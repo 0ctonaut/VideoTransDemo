@@ -535,8 +535,6 @@ func freeVideoCoding() {
 	}
 }
 
-// 注意：readUntilNewline 函数已移至 common.go，避免代码重复
-
 // readFromFile 从文件读取内容，如果文件不存在或为空，会定期检查直到超时
 //
 // 这个函数用于自动化脚本：server 等待 client 将 answer 写入文件
@@ -579,5 +577,3 @@ func readFromFile(filePath string) (in string) {
 	fmt.Fprintf(os.Stderr, "Error: Timeout waiting for answer file: %s\n", filePath)
 	return ""
 }
-
-// 注意：encode 和 decode 函数已移至 common.go，避免代码重复
