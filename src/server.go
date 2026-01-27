@@ -4,19 +4,35 @@
 //go:build !js
 // +build !js
 
-// server is a WebRTC server that sends video from a local file using FFmpeg
+// server.go - WebRTC 服务器程序
+//
+// 这个程序的作用：
+//  1. 读取本地视频文件（支持多种格式：MP4、AVI、MKV 等）
+//  2. 使用 FFmpeg 解码视频（支持 H.264、HEVC 等编码格式）
+//  3. 将视频重新编码为 H.264 格式（WebRTC 标准要求）
+//  4. 通过 WebRTC 发送视频流给客户端
+//
+// 工作流程：
+//  1. 读取视频文件，使用 FFmpeg 解码
+//  2. 将解码后的视频帧重新编码为 H.264
+//  3. 创建 WebRTC offer（会话描述）
+//  4. 等待客户端发送 answer
+//  5. 建立 WebRTC 连接
+//  6. 按视频帧率发送 H.264 数据包
+//
+// 关键概念：
+//   - FFmpeg: 强大的音视频处理库，可以解码和编码各种格式
+//   - 解码（Decode）: 将压缩的视频数据（如 H.264）转换为原始像素数据（YUV）
+//   - 编码（Encode）: 将原始像素数据压缩为视频格式（如 H.264）
+//   - 缩放（Scale）: 调整视频分辨率（如果需要）
+//   - PTS（Presentation Time Stamp）: 视频帧的显示时间戳，用于控制播放速度
 package main
 
 import (
-	"bufio"
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,19 +43,21 @@ import (
 	"github.com/pion/webrtc/v4/pkg/media"
 )
 
+// ========== 全局变量：FFmpeg 相关对象 ==========
+// 这些变量在整个程序运行期间都需要保持，所以定义为全局变量
 var (
-	inputFormatContext   *astiav.FormatContext
-	decodeCodecContext   *astiav.CodecContext
-	decodePacket         *astiav.Packet
-	decodeFrame          *astiav.Frame
-	videoStream          *astiav.Stream
-	audioStream          *astiav.Stream
-	softwareScaleContext *astiav.SoftwareScaleContext
-	scaledFrame          *astiav.Frame
-	encodeCodecContext   *astiav.CodecContext
-	encodePacket         *astiav.Packet
-	pts                  int64
-	err                  error
+	inputFormatContext   *astiav.FormatContext        // 输入文件上下文：包含视频文件的所有信息（格式、流等）
+	decodeCodecContext   *astiav.CodecContext         // 解码器上下文：用于解码视频
+	decodePacket         *astiav.Packet               // 解码数据包：从文件读取的压缩数据
+	decodeFrame          *astiav.Frame                // 解码后的帧：原始像素数据（YUV 格式）
+	videoStream          *astiav.Stream               // 视频流：文件中的视频轨道
+	audioStream          *astiav.Stream               // 音频流：文件中的音频轨道（当前未使用）
+	softwareScaleContext *astiav.SoftwareScaleContext // 缩放上下文：用于调整视频分辨率（如果需要）
+	scaledFrame          *astiav.Frame                // 缩放后的帧：调整分辨率后的像素数据
+	encodeCodecContext   *astiav.CodecContext         // 编码器上下文：用于将像素数据编码为 H.264
+	encodePacket         *astiav.Packet               // 编码后的数据包：H.264 压缩数据
+	pts                  int64                        // 显示时间戳：用于控制视频播放速度
+	err                  error                        // 错误变量：用于存储函数返回的错误
 )
 
 func main() {
@@ -73,30 +91,11 @@ func main() {
 
 	// Everything below is the Pion WebRTC API! Thanks for using it ❤️.
 
-	// Create SettingEngine to configure port range and ICE timeouts
+	// ========== 配置 WebRTC 设置引擎 ==========
+	// 使用公共函数配置 SettingEngine（避免重复代码）
+	// Server 使用端口范围 50000-50100
 	settingEngine := webrtc.SettingEngine{}
-	// Set fixed UDP port range for easier testing (use same range for both)
-	if err := settingEngine.SetEphemeralUDPPortRange(50000, 50100); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to set port range: %v\n", err)
-	}
-	// Increase ICE timeouts for localhost testing (default might be too short)
-	settingEngine.SetICETimeouts(
-		10*time.Second, // Disconnected timeout
-		30*time.Second, // Failed timeout
-		2*time.Second,  // Keepalive interval
-	)
-
-	// Configure NAT 1-to-1 IP mapping if IP is specified
-	if *localIP != "" {
-		// Verify that the IP is valid
-		ip := net.ParseIP(*localIP)
-		if ip == nil {
-			fmt.Fprintf(os.Stderr, "Warning: Invalid IP address: %s, using auto-detect\n", *localIP)
-		} else {
-			settingEngine.SetNAT1To1IPs([]string{*localIP}, webrtc.ICECandidateTypeHost)
-			fmt.Fprintf(os.Stderr, "Using specified IP address: %s\n", *localIP)
-		}
-	}
+	setupWebRTCSettingEngine(&settingEngine, *localIP, 50000, 50100)
 
 	// Prepare the configuration
 	// For localhost testing, we don't need STUN servers - host candidates are sufficient
@@ -129,28 +128,18 @@ func main() {
 	// Create context to wait for ICE connection
 	iceConnectedCtx, iceConnectedCtxCancel := context.WithCancel(context.Background())
 
-	// Set the handler for ICE candidate
-	peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
-		if candidate != nil {
-			fmt.Fprintf(os.Stderr, "ICE Candidate: %s\n", candidate.String())
-		} else {
-			fmt.Fprintf(os.Stderr, "ICE Candidate gathering completed\n")
-		}
-	})
-
-	// Set the handler for ICE connection state
-	peerConnection.OnICEConnectionStateChange(func(connectionState webrtc.ICEConnectionState) {
+	// ========== 设置事件处理器 ==========
+	// 使用公共函数设置默认的事件处理器
+	// 但我们还需要自定义 ICE 连接状态处理器，用于通知主程序连接已建立
+	setupPeerConnectionHandlers(peerConnection, nil, func(connectionState webrtc.ICEConnectionState) {
 		fmt.Fprintf(os.Stderr, "ICE Connection State: %s\n", connectionState.String())
 		if connectionState == webrtc.ICEConnectionStateConnected {
 			fmt.Fprintf(os.Stderr, "ICE connection established!\n")
-			iceConnectedCtxCancel()
+			iceConnectedCtxCancel() // 通知主程序可以开始发送视频了
 		} else if connectionState == webrtc.ICEConnectionStateFailed {
 			fmt.Fprintf(os.Stderr, "ERROR: ICE connection failed!\n")
 		}
-	})
-
-	// Set the handler for Peer connection state
-	peerConnection.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
+	}, func(s webrtc.PeerConnectionState) {
 		fmt.Fprintf(os.Stderr, "Peer Connection State: %s\n", s.String())
 		if s == webrtc.PeerConnectionStateConnected {
 			fmt.Fprintf(os.Stderr, "Peer connection established!\n")
@@ -159,7 +148,11 @@ func main() {
 		}
 	})
 
-	// Create video track (H264)
+	// ========== 第九步：创建视频和音频轨道 ==========
+	// Track 代表一个媒体流，可以是视频或音频
+	// 我们创建 H.264 视频轨道和 Opus 音频轨道（虽然音频当前未使用）
+
+	// 创建 H.264 视频轨道
 	videoTrack, err := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: "video/h264"}, "video", "pion")
 	if err != nil {
 		panic(err)
@@ -169,7 +162,7 @@ func main() {
 		panic(err)
 	}
 
-	// Create audio track (Opus) - optional
+	// 创建 Opus 音频轨道（可选，当前未使用）
 	opusTrack, err := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: "audio/opus"}, "audio", "pion1")
 	if err != nil {
 		panic(err)
@@ -179,28 +172,33 @@ func main() {
 		panic(err)
 	}
 
-	// Create an offer
+	// ========== 第十步：创建 Offer（会话描述） ==========
+	// Offer 包含 Server 支持的编解码器、网络地址等信息
 	offer, err := peerConnection.CreateOffer(nil)
 	if err != nil {
 		panic(err)
 	}
 
-	// Create channel that is blocked until ICE Gathering is complete
+	// ========== 第十一步：等待 ICE 候选收集完成 ==========
+	// 在设置本地描述之前，先创建一个 channel 来等待 ICE 候选收集完成
 	gatherComplete := webrtc.GatheringCompletePromise(peerConnection)
 
-	// Sets the LocalDescription, and starts our UDP listeners
+	// 设置本地描述，这会启动 UDP 监听器，开始收集 ICE 候选
 	if err = peerConnection.SetLocalDescription(offer); err != nil {
 		panic(err)
 	}
 
-	// Block until ICE Gathering is complete, disabling trickle ICE
+	// 阻塞直到 ICE 候选收集完成
+	// 这确保了 Offer 中包含所有可用的网络地址信息
 	fmt.Fprintf(os.Stderr, "Waiting for ICE gathering to complete...\n")
 	<-gatherComplete
 	fmt.Fprintf(os.Stderr, "ICE gathering completed\n")
 
-	// Output the offer in base64 to stdout or file
-	offerStr := encode(peerConnection.LocalDescription())
+	// ========== 输出 Offer ==========
+	// 将 Offer 编码为 base64 字符串，发送给客户端
+	offerStr := encode(peerConnection.LocalDescription()) // 使用公共函数
 	if *offerFile != "" {
+		// 写入文件（用于自动化脚本）
 		err := os.WriteFile(*offerFile, []byte(offerStr+"\n"), 0644)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error writing offer to file: %v\n", err)
@@ -208,32 +206,35 @@ func main() {
 		}
 		fmt.Fprintf(os.Stderr, "Offer written to file: %s (%d bytes)\n", *offerFile, len(offerStr))
 	} else {
-		// Write directly to stdout with newline, then flush
+		// 输出到 stdout（用于手动复制粘贴）
 		os.Stdout.WriteString(offerStr + "\n")
 		os.Stdout.Sync()
 		fmt.Fprintf(os.Stderr, "Offer written to stdout (%d bytes)\n", len(offerStr))
 	}
 
-	// Wait for the answer from stdin or file
+	// ========== 等待客户端的 Answer ==========
+	// Answer 是客户端对 Offer 的回应，包含客户端支持的编解码器和网络地址
 	fmt.Fprintf(os.Stderr, "Waiting for answer from client...\n")
 	answer := webrtc.SessionDescription{}
 	var answerStr string
 	if *answerFile != "" {
+		// 从文件读取（用于自动化脚本）
 		fmt.Fprintf(os.Stderr, "Reading answer from file: %s\n", *answerFile)
 		answerStr = readFromFile(*answerFile)
 	} else {
-		answerStr = readUntilNewline()
+		// 从 stdin 读取（用于手动复制粘贴）
+		answerStr = readUntilNewline() // 使用公共函数
 	}
 	if answerStr == "" {
 		fmt.Fprintf(os.Stderr, "Error: Empty answer received\n")
 		os.Exit(1)
 	}
-	// Validate that answerStr looks like base64
+	// 验证 Answer 格式（base64 字符串应该比较长）
 	if len(answerStr) < 100 {
 		fmt.Fprintf(os.Stderr, "Error: Answer too short (%d chars), expected base64 string\n", len(answerStr))
 		os.Exit(1)
 	}
-	decode(answerStr, &answer)
+	decode(answerStr, &answer) // 使用公共函数解码
 	fmt.Fprintf(os.Stderr, "Answer received, setting remote description...\n")
 
 	// Set the remote SessionDescription
@@ -242,37 +243,46 @@ func main() {
 		panic(fmt.Sprintf("Failed to set remote description: %v", err))
 	}
 
+	// ========== 第十二步：等待 ICE 连接建立 ==========
+	// 在开始发送视频之前，需要先建立网络连接
 	fmt.Fprintf(os.Stderr, "Waiting for ICE connection to establish...\n")
-	// Wait for ICE connection to be established before starting video streaming
-	// Add timeout to avoid waiting forever
+	// 添加超时，避免无限等待
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	select {
 	case <-iceConnectedCtx.Done():
+		// ICE 连接已建立，可以开始发送视频
 		fmt.Fprintf(os.Stderr, "ICE connection established, starting video streaming...\n")
 	case <-ctx.Done():
+		// 超时，但继续发送视频（可能连接已经建立，只是事件未触发）
 		fmt.Fprintf(os.Stderr, "WARNING: ICE connection timeout, starting video streaming anyway...\n")
 	}
 
-	// Initialize video source from file
+	// ========== 第十三步：初始化视频源 ==========
+	// 打开视频文件，创建解码器
 	initVideoSource(absPath)
-	defer freeVideoCoding()
+	defer freeVideoCoding() // 程序退出时释放 FFmpeg 资源
 
-	// Create channel for video completion signal
+	// ========== 第十四步：启动视频发送 ==========
+	// 创建一个 channel 用于接收视频播放完成的信号
 	videoDone := make(chan bool, 1)
 
-	// Start pushing video frames
+	// 在 goroutine 中启动视频发送（不阻塞主程序）
+	// writeVideoToTrack 会按视频帧率持续发送帧，直到视频播放完毕
 	go writeVideoToTrack(videoTrack, *loop, videoDone)
 
-	// Wait for video completion or connection close
+	// ========== 第十五步：等待视频播放完成 ==========
+	// 主程序在这里等待，直到视频播放完毕或超时
 	select {
 	case <-videoDone:
+		// 视频播放完成，关闭连接
 		fmt.Fprintf(os.Stderr, "Video streaming completed, closing connection...\n")
 		if err := peerConnection.Close(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error closing peer connection: %v\n", err)
 		}
-	case <-time.After(24 * time.Hour): // Safety timeout (should never trigger)
+	case <-time.After(24 * time.Hour):
+		// 安全超时（正常情况下不会触发，只是防止程序永远运行）
 		fmt.Fprintf(os.Stderr, "Timeout waiting for video completion\n")
 		if err := peerConnection.Close(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error closing peer connection: %v\n", err)
@@ -525,32 +535,27 @@ func freeVideoCoding() {
 	}
 }
 
-// Read from stdin until we get a newline.
-// This function blocks until a line is read, which is appropriate for interactive terminal input.
-func readUntilNewline() (in string) {
-	r := bufio.NewReader(os.Stdin)
+// 注意：readUntilNewline 函数已移至 common.go，避免代码重复
 
-	// For interactive terminal input, we can simply read a line directly
-	// This will block until the user pastes the answer and presses Enter
-	fmt.Fprintf(os.Stderr, "Paste the answer here and press Enter: ")
-
-	line, err := r.ReadString('\n')
-	if err != nil && err != io.EOF {
-		fmt.Fprintf(os.Stderr, "Error reading from stdin: %v\n", err)
-		return ""
-	}
-
-	in = strings.TrimSpace(line)
-	if len(in) == 0 {
-		fmt.Fprintf(os.Stderr, "Warning: Empty line received, please paste the answer again\n")
-		return ""
-	}
-
-	return in
-}
-
-// Read from file, waiting for file to be created and have content.
-// This function polls the file periodically until it has content or timeout.
+// readFromFile 从文件读取内容，如果文件不存在或为空，会定期检查直到超时
+//
+// 这个函数用于自动化脚本：server 等待 client 将 answer 写入文件
+// 如果文件不存在或为空，函数会每 500ms 检查一次，最多等待 60 秒
+//
+// 为什么需要轮询？
+//   - Client 可能比 Server 晚启动，需要等待 Client 创建文件
+//   - Client 写入文件需要时间，不能立即读取
+//   - 轮询可以避免 Server 一直阻塞等待
+//
+// 参数：
+//   - filePath: 要读取的文件路径
+//
+// 返回：
+//   - 文件内容（已去除首尾空白字符）
+//   - 如果超时或文件为空，返回空字符串
+//
+// 使用场景：
+//   - Server 使用 -answer-file 参数时，会调用这个函数等待 client 写入 answer
 func readFromFile(filePath string) (in string) {
 	deadline := time.Now().Add(60 * time.Second)
 	pollInterval := 500 * time.Millisecond
@@ -575,24 +580,4 @@ func readFromFile(filePath string) (in string) {
 	return ""
 }
 
-// JSON encode + base64 a SessionDescription.
-func encode(obj *webrtc.SessionDescription) string {
-	b, err := json.Marshal(obj)
-	if err != nil {
-		panic(err)
-	}
-
-	return base64.StdEncoding.EncodeToString(b)
-}
-
-// Decode a base64 and unmarshal JSON into a SessionDescription.
-func decode(in string, obj *webrtc.SessionDescription) {
-	b, err := base64.StdEncoding.DecodeString(in)
-	if err != nil {
-		panic(err)
-	}
-
-	if err = json.Unmarshal(b, obj); err != nil {
-		panic(err)
-	}
-}
+// 注意：encode 和 decode 函数已移至 common.go，避免代码重复
