@@ -32,10 +32,11 @@ echo "Reference file: $REFERENCE"
 echo "Frame rate: $FPS fps"
 echo ""
 
-# Convert received H264 to MP4
+# Convert received H264 to MP4 (robust re-encode)
 RECEIVED_MP4="${RECEIVED%.*}.mp4"
 echo "[1/4] Converting received.h264 to MP4..."
-ffmpeg -y -fflags +genpts -r "$FPS" -i "$RECEIVED" -c:v copy "$RECEIVED_MP4" 2>/dev/null
+ffmpeg -y -fflags +genpts -err_detect ignore_err -r "$FPS" -i "$RECEIVED" \
+  -c:v libx264 -preset veryfast -crf 18 "$RECEIVED_MP4" 2>/dev/null
 echo "  ✓ Converted to: $RECEIVED_MP4"
 echo ""
 
@@ -85,4 +86,3 @@ if [ -f "$VMAF_JSON" ]; then
     fi
 fi
 echo ""
-

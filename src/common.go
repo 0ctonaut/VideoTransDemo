@@ -24,7 +24,7 @@ import (
 )
 
 // encode 将 WebRTC 的 SessionDescription（会话描述）编码为 base64 格式的 JSON 字符串
-// 
+//
 // 什么是 SessionDescription？
 // - 它包含了 WebRTC 连接所需的所有信息：支持的编解码器、网络地址（IP:端口）、加密密钥等
 // - 在 WebRTC 中，需要先交换这些信息（通过 SDP），双方才能建立连接
@@ -62,8 +62,9 @@ func encode(obj *webrtc.SessionDescription) string {
 //   - obj: 用于存储解码结果的 SessionDescription 对象指针（会被修改）
 //
 // 使用示例：
-//   answer := webrtc.SessionDescription{}
-//   decode(answerStr, &answer)
+//
+//	answer := webrtc.SessionDescription{}
+//	decode(answerStr, &answer)
 func decode(in string, obj *webrtc.SessionDescription) {
 	// 第一步：将 base64 字符串解码为原始的 JSON 字节数组
 	b, err := base64.StdEncoding.DecodeString(in)
@@ -119,6 +120,38 @@ func readUntilNewline() (in string) {
 	}
 
 	return
+}
+
+// readFromFile 从文件读取内容，如果文件不存在或为空，会定期检查直到超时
+//
+// 这个函数用于自动化脚本：server 等待 client 将 answer 写入文件
+// 如果文件不存在或为空，函数会每 500ms 检查一次，最多等待 60 秒
+//
+// 使用场景：
+//   - Server 使用 -answer-file 参数时，会调用这个函数等待 client 写入 answer
+//   - client-gcc / server-gcc 也可以通过该函数实现基于文件的 SDP 交换
+func readFromFile(filePath string) (in string) {
+	deadline := time.Now().Add(60 * time.Second)
+	pollInterval := 500 * time.Millisecond
+
+	for time.Now().Before(deadline) {
+		// Check if file exists and has content
+		data, err := os.ReadFile(filePath)
+		if err == nil && len(data) > 0 {
+			in = strings.TrimSpace(string(data))
+			if len(in) > 0 {
+				fmt.Fprintf(os.Stderr, "Answer read from file (%d bytes)\n", len(in))
+				return in
+			}
+		}
+
+		// Wait before next check
+		time.Sleep(pollInterval)
+		fmt.Fprintf(os.Stderr, "Waiting for answer file... (timeout in %v)\n", deadline.Sub(time.Now()).Round(time.Second))
+	}
+
+	fmt.Fprintf(os.Stderr, "Error: Timeout waiting for answer file: %s\n", filePath)
+	return ""
 }
 
 // setupWebRTCSettingEngine 配置 WebRTC 的 SettingEngine（设置引擎）
@@ -259,4 +292,3 @@ func setupPeerConnectionHandlers(
 		})
 	}
 }
-

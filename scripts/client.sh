@@ -11,9 +11,6 @@ OUTPUT_FILE=""
 MAX_DURATION=""
 MAX_SIZE=""
 USE_NETNS=""
-MM_DELAY=""
-MM_LOSS=""
-MM_LINK=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -37,25 +34,9 @@ while [[ $# -gt 0 ]]; do
             USE_NETNS="yes"
             shift
             ;;
-        --mmdelay)
-            MM_DELAY="$2"
-            shift 2
-            ;;
-        --mmloss)
-            MM_LOSS="$2"
-            shift 2
-            ;;
-        --mmlink)
-            MM_LINK="$2"
-            shift 2
-            ;;
-        --mmlink-default|--mmlink-default)
-            MM_LINK="default"
-            shift
-            ;;
         -*)
             echo "Unknown option: $1"
-            echo "Usage: $0 [session_folder] [-ip <ip_address>] [-output <output_file>] [-max-duration <duration>] [-max-size <MB>] [-netns] [--mmdelay <delay>] [--mmloss <loss>] [--mmlink <link>] [--mmlink-default]"
+            echo "Usage: $0 [session_folder] [-ip <ip_address>] [-output <output_file>] [-max-duration <duration>] [-max-size <MB>] [-netns]"
             exit 1
             ;;
         *)
@@ -89,35 +70,8 @@ if [ ! -d "$SESSION_DIR" ]; then
     exit 1
 fi
 
-# Find default TMobile-LTE-driving trace files
-find_default_traces() {
-    TRACE_DIRS=(
-        "/usr/local/share/mahimahi/traces"
-        "/usr/share/mahimahi/traces"
-        "$HOME/mahimahi/traces"
-    )
-    
-    for dir in "${TRACE_DIRS[@]}"; do
-        if [ -f "$dir/TMobile-LTE-driving.up" ] && [ -f "$dir/TMobile-LTE-driving.down" ]; then
-            echo "$dir/TMobile-LTE-driving"
-            return 0
-        fi
-    done
-    return 1
-}
-
-# Check mahimahi tools if mahimahi parameters are specified
-if [ -n "$MM_DELAY" ] || [ -n "$MM_LOSS" ] || [ -n "$MM_LINK" ]; then
-    if ! command -v mm-link &> /dev/null || ! command -v mm-delay &> /dev/null || ! command -v mm-loss &> /dev/null; then
-        echo "Error: mahimahi tools not found. Please install mahimahi or ensure they are in PATH."
-        exit 1
-    fi
-fi
-
 # Check and auto-build client if needed
 # 如果二进制文件不存在，或者源文件比二进制文件新，则自动编译
-# 注意：脚本在 scripts/ 目录，需要回到项目根目录
-cd "$(dirname "$0")/.." || exit 1
 CLIENT_BIN="./build/client"
 if [ ! -f "$CLIENT_BIN" ] || [ "src/client.go" -nt "$CLIENT_BIN" ] || [ "src/common.go" -nt "$CLIENT_BIN" ]; then
     echo "Building client..."
@@ -171,103 +125,21 @@ elif [ -n "$CLIENT_IP" ]; then
 else
     echo "Client IP: auto-detect"
 fi
-if [ -n "$MM_DELAY" ] || [ -n "$MM_LOSS" ] || [ -n "$MM_LINK" ]; then
-    echo "Mahimahi network emulation: enabled"
-    if [ -n "$MM_DELAY" ]; then
-        echo "  - Delay: ${MM_DELAY}ms"
-    fi
-    if [ -n "$MM_LOSS" ]; then
-        echo "  - Loss: ${MM_LOSS} ($(echo "$MM_LOSS * 100" | bc -l | xargs printf "%.2f")%)"
-    fi
-    if [ -n "$MM_LINK" ]; then
-        echo "  - Link: $MM_LINK"
-    else
-        echo "  - Link: TMobile-LTE-driving (default)"
-    fi
-    if [ -n "$USE_NETNS" ]; then
-        echo "  - Note: Running mahimahi inside network namespace (nested mode)"
-    fi
-fi
 echo ""
 
 # Build client command
-# Note: Don't use quotes in CLIENT_CMD when it will be used in mahimahi chain
-# mahimahi tools need the command as separate arguments
-CLIENT_CMD="./build/client -answer-file $ANSWER_FILE -output $OUTPUT_FILE"
+CLIENT_CMD="./client -answer-file \"$ANSWER_FILE\" -output \"$OUTPUT_FILE\""
 
 if [ -n "$CLIENT_IP" ]; then
-    CLIENT_CMD="$CLIENT_CMD -ip $CLIENT_IP"
+    CLIENT_CMD="$CLIENT_CMD -ip \"$CLIENT_IP\""
 fi
 
 if [ -n "$MAX_DURATION" ]; then
-    CLIENT_CMD="$CLIENT_CMD -max-duration $MAX_DURATION"
+    CLIENT_CMD="$CLIENT_CMD -max-duration \"$MAX_DURATION\""
 fi
 
 if [ -n "$MAX_SIZE" ]; then
-    CLIENT_CMD="$CLIENT_CMD -max-size $MAX_SIZE"
-fi
-
-# Build mahimahi command chain if mahimahi parameters are specified
-MM_CMD=""
-if [ -n "$MM_DELAY" ] || [ -n "$MM_LOSS" ] || [ -n "$MM_LINK" ]; then
-    # Determine uplink and downlink for mm-link
-    if [ -n "$MM_LINK" ]; then
-        # Check if user wants default traces
-        if [ "$MM_LINK" = "default" ]; then
-            # User explicitly requested default traces
-            DEFAULT_TRACE=$(find_default_traces)
-            if [ -n "$DEFAULT_TRACE" ]; then
-                MM_CMD="mm-link ${DEFAULT_TRACE}.up ${DEFAULT_TRACE}.down"
-                echo "Using default traces: ${DEFAULT_TRACE}.{up,down}"
-            else
-                echo "Error: Default TMobile-LTE-driving traces not found"
-                exit 1
-            fi
-        else
-            # User specified link (trace file path)
-            # Check if it's two arguments (uplink downlink) or one (same for both)
-            LINK_PARTS=($MM_LINK)
-            if [ ${#LINK_PARTS[@]} -eq 2 ]; then
-                # Two arguments: separate uplink and downlink
-                UPLINK="${LINK_PARTS[0]}"
-                DOWNLINK="${LINK_PARTS[1]}"
-                MM_CMD="mm-link $UPLINK $DOWNLINK"
-            else
-                # One argument: use for both uplink and downlink
-                MM_CMD="mm-link $MM_LINK $MM_LINK"
-            fi
-        fi
-    elif [ -n "$MM_DELAY" ] || [ -n "$MM_LOSS" ]; then
-        # User specified delay or loss but not link, use default traces
-        DEFAULT_TRACE=$(find_default_traces)
-        if [ -n "$DEFAULT_TRACE" ]; then
-            MM_CMD="mm-link ${DEFAULT_TRACE}.up ${DEFAULT_TRACE}.down"
-            echo "Using default traces: ${DEFAULT_TRACE}.{up,down}"
-        else
-            echo "Warning: Default TMobile-LTE-driving traces not found, skipping mm-link"
-        fi
-    fi
-    
-    # Add mm-delay if specified
-    # Note: mm-link chains with mm-delay/mm-loss without -- separator
-    if [ -n "$MM_DELAY" ] && [ -n "$MM_CMD" ]; then
-        # MM_CMD already contains mm-link, chain mm-delay directly (no --)
-        MM_CMD="$MM_CMD mm-delay $MM_DELAY"
-    elif [ -n "$MM_DELAY" ]; then
-        MM_CMD="mm-delay $MM_DELAY"
-    fi
-    
-    # Add mm-loss if specified (apply to both uplink and downlink)
-    if [ -n "$MM_LOSS" ]; then
-        if [ -n "$MM_CMD" ]; then
-            # Chain mm-loss directly (no -- separator)
-            MM_CMD="$MM_CMD mm-loss uplink $MM_LOSS mm-loss downlink $MM_LOSS"
-        else
-            MM_CMD="mm-loss uplink $MM_LOSS mm-loss downlink $MM_LOSS"
-        fi
-    fi
-    
-    # Note: We'll add the original command later, after handling stdin
+    CLIENT_CMD="$CLIENT_CMD -max-size \"$MAX_SIZE\""
 fi
 
 # Wrap command with namespace if -netns is used
@@ -288,34 +160,10 @@ if [ -n "$USE_NETNS" ]; then
     
     # Wrap with namespace execution
     # Note: stdin redirection needs to be handled carefully with sudo
-    if [ -n "$MM_CMD" ]; then
-        # Nested mode: mahimahi inside netns
-        # Build the full command: mahimahi chain + client command
-        # mm-link needs -- before command
-        if [[ "$MM_CMD" == mm-link* ]]; then
-            FULL_CMD="$MM_CMD -- $CLIENT_CMD"
-        else
-            FULL_CMD="$MM_CMD $CLIENT_CMD"
-        fi
-        CLIENT_CMD="sudo ip netns exec client bash -c \"cat \\\"$(pwd)/$OFFER_FILE\\\" | $FULL_CMD\""
-    else
-        CLIENT_CMD="sudo ip netns exec client bash -c \"cat \\\"$(pwd)/$OFFER_FILE\\\" | $CLIENT_CMD\""
-    fi
+    CLIENT_CMD="sudo ip netns exec client bash -c \"cat \\\"$(pwd)/$OFFER_FILE\\\" | $CLIENT_CMD\""
     eval $CLIENT_CMD
 else
     # Read offer from file and pass to client via stdin
-    if [ -n "$MM_CMD" ]; then
-        # Use mahimahi, need to handle stdin properly
-        # Build the full command: mahimahi chain + client command
-        # mm-link needs -- before command
-        if [[ "$MM_CMD" == mm-link* ]]; then
-            FULL_CMD="$MM_CMD -- $CLIENT_CMD"
-        else
-            FULL_CMD="$MM_CMD $CLIENT_CMD"
-        fi
-        cat "$OFFER_FILE" | eval $FULL_CMD
-    else
-        cat "$OFFER_FILE" | eval $CLIENT_CMD
-    fi
+    cat "$OFFER_FILE" | eval $CLIENT_CMD
 fi
 

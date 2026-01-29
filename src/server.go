@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2026 The Pion community <https://pion.ly>
 // SPDX-License-Identifier: MIT
 
-//go:build !js
-// +build !js
+//go:build !js && !gcc
+// +build !js,!gcc
 
 // server.go - WebRTC 服务器程序
 //
@@ -35,7 +35,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/asticode/go-astiav"
@@ -533,47 +532,4 @@ func freeVideoCoding() {
 	if encodePacket != nil {
 		encodePacket.Free()
 	}
-}
-
-// readFromFile 从文件读取内容，如果文件不存在或为空，会定期检查直到超时
-//
-// 这个函数用于自动化脚本：server 等待 client 将 answer 写入文件
-// 如果文件不存在或为空，函数会每 500ms 检查一次，最多等待 60 秒
-//
-// 为什么需要轮询？
-//   - Client 可能比 Server 晚启动，需要等待 Client 创建文件
-//   - Client 写入文件需要时间，不能立即读取
-//   - 轮询可以避免 Server 一直阻塞等待
-//
-// 参数：
-//   - filePath: 要读取的文件路径
-//
-// 返回：
-//   - 文件内容（已去除首尾空白字符）
-//   - 如果超时或文件为空，返回空字符串
-//
-// 使用场景：
-//   - Server 使用 -answer-file 参数时，会调用这个函数等待 client 写入 answer
-func readFromFile(filePath string) (in string) {
-	deadline := time.Now().Add(60 * time.Second)
-	pollInterval := 500 * time.Millisecond
-
-	for time.Now().Before(deadline) {
-		// Check if file exists and has content
-		data, err := os.ReadFile(filePath)
-		if err == nil && len(data) > 0 {
-			in = strings.TrimSpace(string(data))
-			if len(in) > 0 {
-				fmt.Fprintf(os.Stderr, "Answer read from file (%d bytes)\n", len(in))
-				return in
-			}
-		}
-
-		// Wait before next check
-		time.Sleep(pollInterval)
-		fmt.Fprintf(os.Stderr, "Waiting for answer file... (timeout in %v)\n", deadline.Sub(time.Now()).Round(time.Second))
-	}
-
-	fmt.Fprintf(os.Stderr, "Error: Timeout waiting for answer file: %s\n", filePath)
-	return ""
 }
