@@ -3,6 +3,7 @@
 //
 //go:build !js && burst
 // +build !js,burst
+
 //
 // server_burst.go - BurstRTC 实验用 WebRTC 服务器（工程近似版）
 
@@ -10,11 +11,13 @@ package main
 
 import (
 	"context"
+	"encoding/csv"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/asticode/go-astiav"
@@ -195,8 +198,21 @@ func main() {
 		BurstFraction: 0.3, // 默认 30% burst
 	})
 
+	// 创建 metrics CSV writer（如果 session-dir 存在）
+	var metricsWriter *BurstMetricsWriter
+	if *sessionDir != "" {
+		csvPath := filepath.Join(*sessionDir, "burst_server_metrics.csv")
+		var err error
+		metricsWriter, err = NewBurstMetricsWriter(csvPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to create metrics CSV writer: %v\n", err)
+		} else {
+			defer metricsWriter.Close()
+		}
+	}
+
 	videoDone := make(chan bool, 1)
-	go writeVideoToTrackBurst(videoTrack, *loop, burstCtrl, videoDone)
+	go writeVideoToTrackBurst(videoTrack, *loop, burstCtrl, metricsWriter, videoDone)
 
 	select {
 	case <-videoDone:
@@ -212,9 +228,106 @@ func main() {
 	}
 }
 
+// BurstMetricsWriter 用于写入 BurstRTC server 端的 metrics CSV
+type BurstMetricsWriter struct {
+	mu     sync.Mutex
+	writer *csv.Writer
+	file   *os.File
+}
+
+// NewBurstMetricsWriter 创建一个新的 BurstRTC metrics CSV writer
+func NewBurstMetricsWriter(csvPath string) (*BurstMetricsWriter, error) {
+	if csvPath == "" {
+		return nil, fmt.Errorf("csvPath is empty")
+	}
+
+	dir := filepath.Dir(csvPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create metrics directory: %w", err)
+	}
+
+	f, err := os.Create(csvPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create metrics csv: %w", err)
+	}
+
+	w := csv.NewWriter(f)
+
+	header := []string{
+		"frame_index",
+		"target_bits",
+		"actual_bits",
+		"burst_fraction",
+		"send_start_unix_ms",
+		"send_end_unix_ms",
+		"send_duration_ms",
+		"est_capacity_bps",
+		"frame_size_mean",
+		"frame_size_var",
+	}
+	if err = w.Write(header); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("failed to write metrics header: %w", err)
+	}
+	w.Flush()
+
+	return &BurstMetricsWriter{
+		writer: w,
+		file:   f,
+	}, nil
+}
+
+// WriteBurstMetric 写入一条 BurstRTC 帧级指标
+func (m *BurstMetricsWriter) WriteBurstMetric(frameIndex, targetBits, actualBits int, burstFraction float64, sendStart, sendEnd time.Time, estCapacityBps, meanBits, varBits float64) {
+	if m == nil || m.writer == nil {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	sendDuration := sendEnd.Sub(sendStart).Seconds() * 1000 // 转换为毫秒
+
+	record := []string{
+		fmt.Sprintf("%d", frameIndex),
+		fmt.Sprintf("%d", targetBits),
+		fmt.Sprintf("%d", actualBits),
+		fmt.Sprintf("%.4f", burstFraction),
+		fmt.Sprintf("%d", sendStart.UnixMilli()),
+		fmt.Sprintf("%d", sendEnd.UnixMilli()),
+		fmt.Sprintf("%.3f", sendDuration),
+		fmt.Sprintf("%.2f", estCapacityBps),
+		fmt.Sprintf("%.2f", meanBits),
+		fmt.Sprintf("%.2f", varBits),
+	}
+	if err := m.writer.Write(record); err != nil {
+		fmt.Fprintf(os.Stderr, "Error writing BurstRTC metrics CSV: %v\n", err)
+		return
+	}
+	m.writer.Flush()
+}
+
+// Close 关闭底层文件句柄
+func (m *BurstMetricsWriter) Close() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.writer != nil {
+		m.writer.Flush()
+	}
+	if m.file != nil {
+		if err := m.file.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error closing BurstRTC metrics CSV file: %v\n", err)
+		}
+	}
+}
+
 // writeVideoToTrackBurst 基于 FFmpeg 解码+编码，将 H.264 帧发送到 WebRTC video track，
 // 同时为每一帧更新 BurstRTC 控制器，记录发送统计并应用 per-frame 预算控制。
-func writeVideoToTrackBurst(track *webrtc.TrackLocalStaticSample, loopVideo bool, ctrl *BurstController, done chan<- bool) {
+func writeVideoToTrackBurst(track *webrtc.TrackLocalStaticSample, loopVideo bool, ctrl *BurstController, metricsWriter *BurstMetricsWriter, done chan<- bool) {
 	frameRate := videoStream.AvgFrameRate()
 	if frameRate.Num() == 0 {
 		frameRate = astiav.NewRational(30, 1)
@@ -328,11 +441,16 @@ func writeVideoToTrackBurst(track *webrtc.TrackLocalStaticSample, loopVideo bool
 				SendEnd:   sendEnd,
 			})
 
-			// 获取统计信息用于日志
+			// 获取统计信息用于日志和 CSV
 			meanBits, varBits, availBps := ctrl.GetStats()
 			fmt.Fprintf(os.Stderr, "[BurstRTC] Frame %d: sent_bits=%d, target_bits=%d, burst_frac=%.2f, mean=%.0f, var=%.0f, avail_bps=%.0f\n",
 				frameID, sentBitsForFrame, targetBits, burstFraction, meanBits, varBits, availBps)
+
+			// 写入 metrics CSV
+			if metricsWriter != nil {
+				metricsWriter.WriteBurstMetric(frameID, targetBits, sentBitsForFrame, burstFraction,
+					sendStart, sendEnd, availBps, meanBits, varBits)
+			}
 		}
 	}
 }
-

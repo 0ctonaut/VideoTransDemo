@@ -178,3 +178,4 @@ func (c *BurstController) GetStats() (meanBits float64, varianceBits float64, av
 	return c.frameSizeMean, c.frameSizeVar, c.availableBps
 }
 
+

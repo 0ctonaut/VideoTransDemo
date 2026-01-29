@@ -14,12 +14,16 @@ CLIENT_GCC_SRC := $(SRC_DIR)/client-gcc.go $(SRC_DIR)/common.go $(SRC_DIR)/metri
 SERVER_GCC_SRC := $(SRC_DIR)/server-gcc.go $(SRC_DIR)/common.go $(SRC_DIR)/server_ffmpeg_gcc.go
 
 # NDTC 源文件
-SERVER_NDTC_SRC := $(SRC_DIR)/server_ndtc.go $(SRC_DIR)/common.go $(SRC_DIR)/ndtc_controller.go
-CLIENT_NDTC_SRC := $(SRC_DIR)/client_ndtc.go $(SRC_DIR)/common.go $(SRC_DIR)/metrics.go $(SRC_DIR)/ndtc_controller.go
+SERVER_NDTC_SRC := $(SRC_DIR)/server_ndtc.go $(SRC_DIR)/common.go $(SRC_DIR)/ndtc_controller.go $(SRC_DIR)/fdace_estimator.go $(SRC_DIR)/server_ffmpeg_ndtc.go
+CLIENT_NDTC_SRC := $(SRC_DIR)/client_ndtc.go $(SRC_DIR)/common.go $(SRC_DIR)/metrics.go $(SRC_DIR)/h264_writer.go
 
 # Salsify 源文件
-SERVER_SALSIFY_SRC := $(SRC_DIR)/server_salsify.go $(SRC_DIR)/common.go $(SRC_DIR)/salsify_controller.go
-CLIENT_SALSIFY_SRC := $(SRC_DIR)/client_salsify.go $(SRC_DIR)/common.go $(SRC_DIR)/metrics.go $(SRC_DIR)/salsify_controller.go
+SERVER_SALSIFY_SRC := $(SRC_DIR)/server_salsify.go $(SRC_DIR)/common.go $(SRC_DIR)/salsify_controller.go $(SRC_DIR)/server_ffmpeg_salsify.go
+CLIENT_SALSIFY_SRC := $(SRC_DIR)/client_salsify.go $(SRC_DIR)/common.go $(SRC_DIR)/metrics.go $(SRC_DIR)/salsify_controller.go $(SRC_DIR)/h264_writer.go
+
+# BurstRTC 源文件
+SERVER_BURST_SRC := $(SRC_DIR)/server_burst.go $(SRC_DIR)/common.go $(SRC_DIR)/burst_controller.go $(SRC_DIR)/server_ffmpeg_burst.go
+CLIENT_BURST_SRC := $(SRC_DIR)/client_burst.go $(SRC_DIR)/common.go $(SRC_DIR)/metrics.go $(SRC_DIR)/burst_controller.go $(SRC_DIR)/h264_writer.go
 
 # 编译输出
 CLIENT_BIN := $(BUILD_DIR)/client
@@ -30,6 +34,8 @@ SERVER_NDTC_BIN := $(BUILD_DIR)/server-ndtc
 CLIENT_NDTC_BIN := $(BUILD_DIR)/client-ndtc
 SERVER_SALSIFY_BIN := $(BUILD_DIR)/server-salsify
 CLIENT_SALSIFY_BIN := $(BUILD_DIR)/client-salsify
+SERVER_BURST_BIN := $(BUILD_DIR)/server-burst
+CLIENT_BURST_BIN := $(BUILD_DIR)/client-burst
 
 # Go 工具配置
 GO := go
@@ -91,7 +97,7 @@ server-ndtc: $(SERVER_NDTC_BIN)
 
 $(SERVER_NDTC_BIN): $(SERVER_NDTC_SRC) | $(BUILD_DIR)
 	@echo "Building NDTC server..."
-	$(GO) build $(GOFLAGS) -o $(SERVER_NDTC_BIN) $(SERVER_NDTC_SRC)
+	$(GO) build $(GOFLAGS) -tags ndtc -o $(SERVER_NDTC_BIN) $(SERVER_NDTC_SRC)
 
 # 编译 NDTC 客户端
 .PHONY: client-ndtc
@@ -100,7 +106,7 @@ client-ndtc: $(CLIENT_NDTC_BIN)
 
 $(CLIENT_NDTC_BIN): $(CLIENT_NDTC_SRC) | $(BUILD_DIR)
 	@echo "Building NDTC client..."
-	$(GO) build $(GOFLAGS) -o $(CLIENT_NDTC_BIN) $(CLIENT_NDTC_SRC)
+	$(GO) build $(GOFLAGS) -tags ndtc -o $(CLIENT_NDTC_BIN) $(CLIENT_NDTC_SRC)
 
 # 编译 Salsify 服务器
 .PHONY: server-salsify
@@ -109,7 +115,7 @@ server-salsify: $(SERVER_SALSIFY_BIN)
 
 $(SERVER_SALSIFY_BIN): $(SERVER_SALSIFY_SRC) | $(BUILD_DIR)
 	@echo "Building Salsify server..."
-	$(GO) build $(GOFLAGS) -o $(SERVER_SALSIFY_BIN) $(SERVER_SALSIFY_SRC)
+	$(GO) build $(GOFLAGS) -tags salsify -o $(SERVER_SALSIFY_BIN) $(SERVER_SALSIFY_SRC)
 
 # 编译 Salsify 客户端
 .PHONY: client-salsify
@@ -118,7 +124,25 @@ client-salsify: $(CLIENT_SALSIFY_BIN)
 
 $(CLIENT_SALSIFY_BIN): $(CLIENT_SALSIFY_SRC) | $(BUILD_DIR)
 	@echo "Building Salsify client..."
-	$(GO) build $(GOFLAGS) -o $(CLIENT_SALSIFY_BIN) $(CLIENT_SALSIFY_SRC)
+	$(GO) build $(GOFLAGS) -tags salsify -o $(CLIENT_SALSIFY_BIN) $(CLIENT_SALSIFY_SRC)
+
+# 编译 BurstRTC 服务器
+.PHONY: server-burst
+server-burst: $(SERVER_BURST_BIN)
+	@echo "BurstRTC server built successfully!"
+
+$(SERVER_BURST_BIN): $(SERVER_BURST_SRC) | $(BUILD_DIR)
+	@echo "Building BurstRTC server..."
+	$(GO) build $(GOFLAGS) -tags burst -o $(SERVER_BURST_BIN) $(SERVER_BURST_SRC)
+
+# 编译 BurstRTC 客户端
+.PHONY: client-burst
+client-burst: $(CLIENT_BURST_BIN)
+	@echo "BurstRTC client built successfully!"
+
+$(CLIENT_BURST_BIN): $(CLIENT_BURST_SRC) | $(BUILD_DIR)
+	@echo "Building BurstRTC client..."
+	$(GO) build $(GOFLAGS) -tags burst -o $(CLIENT_BURST_BIN) $(CLIENT_BURST_SRC)
 
 # 创建 build 目录（如果不存在）
 $(BUILD_DIR):
@@ -153,16 +177,34 @@ test:
 	$(GO) test ./$(SRC_DIR)/...
 	@echo "Tests completed!"
 
+# 一键编译所有算法
+.PHONY: all-algorithms
+all-algorithms: $(CLIENT_GCC_BIN) $(SERVER_GCC_BIN) $(CLIENT_NDTC_BIN) $(SERVER_NDTC_BIN) $(CLIENT_SALSIFY_BIN) $(SERVER_SALSIFY_BIN) $(CLIENT_BURST_BIN) $(SERVER_BURST_BIN)
+	@echo "All algorithms built successfully!"
+
 # 显示帮助信息
 .PHONY: help
 help:
 	@echo "WebRTC Video Streaming Project - Makefile"
 	@echo ""
 	@echo "Available targets:"
-	@echo "  make          - Build both client and server (default)"
-	@echo "  make build    - Build both client and server"
-	@echo "  make client   - Build client only"
-	@echo "  make server   - Build server only"
+	@echo "  make                - Build both client and server (default, basic version)"
+	@echo "  make build          - Build both client and server"
+	@echo "  make client         - Build client only"
+	@echo "  make server         - Build server only"
+	@echo ""
+	@echo "Algorithm-specific targets:"
+	@echo "  make client-gcc     - Build GCC client"
+	@echo "  make server-gcc     - Build GCC server"
+	@echo "  make client-ndtc    - Build NDTC client"
+	@echo "  make server-ndtc    - Build NDTC server"
+	@echo "  make client-salsify - Build Salsify client"
+	@echo "  make server-salsify - Build Salsify server"
+	@echo "  make client-burst   - Build BurstRTC client"
+	@echo "  make server-burst   - Build BurstRTC server"
+	@echo "  make all-algorithms - Build all algorithms (GCC, NDTC, Salsify, BurstRTC)"
+	@echo ""
+	@echo "Other targets:"
 	@echo "  make clean    - Remove build directory (keeps session_* directories)"
 	@echo "  make fmt      - Format Go source code"
 	@echo "  make vet      - Run go vet on source code"

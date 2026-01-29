@@ -1,5 +1,18 @@
 # WebRTC 手动运行指南
 
+本指南介绍如何使用 `network-ws` 项目进行 WebRTC 视频传输实验，包括基础版本和多种拥塞控制算法（GCC、NDTC、Salsify、BurstRTC）的对比实验。
+
+## 目录
+
+1. [快速开始](#快速开始)
+2. [编译方法](#编译方法)
+3. [算法概述](#算法概述)
+4. [各算法使用方法](#各算法使用方法)
+5. [mahimahi 网络模拟](#mahimahi-网络模拟)
+6. [视频质量评估](#视频质量评估)
+7. [对比实验](#对比实验)
+8. [手动运行方式](#手动运行方式)
+
 ## 快速开始（推荐方式）
 
 使用启动脚本，自动管理时间戳文件夹和临时文件。
@@ -32,6 +45,282 @@
 - 从 session 文件夹读取 `offer.txt`
 - 生成 answer 并写入 `answer.txt`
 - 接收视频并保存到 `received.h264`（默认在 session 文件夹内）
+
+## 编译方法
+
+### 基础版本
+
+```bash
+# 编译基础 client 和 server
+make
+
+# 或分别编译
+make client
+make server
+```
+
+### 各算法编译
+
+项目支持四种拥塞控制算法的对比实验：
+
+```bash
+# GCC (Google Congestion Control)
+make server-gcc
+make client-gcc
+
+# NDTC (Network Delivery Time Control)
+make server-ndtc
+make client-ndtc
+
+# Salsify
+make server-salsify
+make client-salsify
+
+# BurstRTC (Frame-Bursting Congestion Control)
+make server-burst
+make client-burst
+```
+
+### 一键编译所有算法
+
+```bash
+# 编译所有算法（GCC、NDTC、Salsify、BurstRTC）
+make all-algorithms
+```
+
+编译后的二进制文件位于 `build/` 目录下：
+- `build/server-gcc`, `build/client-gcc`
+- `build/server-ndtc`, `build/client-ndtc`
+- `build/server-salsify`, `build/client-salsify`
+- `build/server-burst`, `build/client-burst`
+
+## 算法概述
+
+### GCC (Google Congestion Control)
+- **特点**：基于 delay gradient 的拥塞控制，WebRTC 中广泛使用
+- **适用场景**：通用 RTC 应用
+- **参考文档**：`docs/` 目录下的相关论文
+
+### NDTC (Network Delivery Time Control)
+- **特点**：基于 FDACE（Frame Dithering Available Capacity Estimation）的"按时交付"控制
+- **优势**：显式控制帧延迟，适合低延迟场景
+- **参考文档**：`docs/ndtc-overview.md`
+
+### Salsify
+- **特点**：codec-transport 紧耦合的 per-frame 预算控制
+- **优势**：纯函数式编码器，支持多候选编码选择
+- **参考文档**：`docs/salsify-overview.md`
+
+### BurstRTC (Frame-Bursting Congestion Control)
+- **特点**：以帧突发发送为中心的拥塞控制，显式处理 bit-rate variation
+- **优势**：通过帧大小统计模型和解析速率控制优化 tail delay
+- **参考文档**：`docs/burstrtc-overview.md`
+
+## 各算法使用方法
+
+所有算法都使用统一的脚本接口，支持相同的参数格式。
+
+### GCC
+
+**终端 1 - Server:**
+```bash
+./scripts/server-gcc.sh --video assets/Ultra.mp4
+```
+
+**终端 2 - Client:**
+```bash
+./scripts/client-gcc.sh --video assets/Ultra.mp4
+```
+
+### NDTC
+
+**终端 1 - Server:**
+```bash
+./scripts/server-ndtc.sh --video assets/Ultra.mp4
+```
+
+**终端 2 - Client:**
+```bash
+./scripts/client-ndtc.sh --video assets/Ultra.mp4
+```
+
+### Salsify
+
+**终端 1 - Server:**
+```bash
+./scripts/server-salsify.sh --video assets/Ultra.mp4
+```
+
+**终端 2 - Client:**
+```bash
+./scripts/client-salsify.sh --video assets/Ultra.mp4
+```
+
+### BurstRTC
+
+**终端 1 - Server:**
+```bash
+./scripts/server-burst.sh --video assets/Ultra.mp4
+```
+
+**终端 2 - Client:**
+```bash
+./scripts/client-burst.sh --video assets/Ultra.mp4
+```
+
+### 脚本参数说明
+
+所有 server 脚本支持以下参数：
+
+- `--video <file>`: 视频文件路径（必需）
+- `--ip <address>`: 本地 IP 地址（可选，如 192.168.100.1）
+- `--session <name>`: 自定义 session 目录名（可选，默认自动生成时间戳）
+- `--loop`: 循环播放视频（可选）
+- `--mmdelay <ms>`: mahimahi 延迟（毫秒，可选）
+- `--mmloss <uplink> <downlink>`: mahimahi 丢包率（两个值，可选）
+- `--mmlink <uplink_trace> <downlink_trace>`: mahimahi 链路 trace（可选）
+
+所有 client 脚本支持以下参数：
+
+- `--video <file>`: 参考视频文件路径（用于评估，必需）
+- `--session <name>`: 指定 session 目录（可选，默认使用最新的）
+- `--ip <address>`: 本地 IP 地址（可选）
+- `--max-duration <duration>`: 最大录制时长（如 60s, 5m，可选）
+- `--max-size <MB>`: 最大文件大小（MB，可选）
+
+## mahimahi 网络模拟
+
+项目集成了 [mahimahi](http://mahimahi.mit.edu/) 网络模拟器，可以在受控的网络条件下测试不同算法。
+
+### 基本用法
+
+mahimahi 参数通过 server 脚本传递：
+
+```bash
+# 只设置延迟（50ms）
+./scripts/server-gcc.sh --video assets/Ultra.mp4 --mmdelay 50
+
+# 设置延迟和丢包率（上行 0.01，下行 0.01）
+./scripts/server-gcc.sh --video assets/Ultra.mp4 --mmdelay 100 --mmloss 0.01 0.01
+
+# 使用链路 trace 文件
+./scripts/server-gcc.sh --video assets/Ultra.mp4 --mmlink uplink.trace downlink.trace
+
+# 组合使用多个参数
+./scripts/server-gcc.sh --video assets/Ultra.mp4 \
+  --mmdelay 100 \
+  --mmloss 0.01 0.01 \
+  --mmlink uplink.trace downlink.trace
+```
+
+### mahimahi 参数说明
+
+- **`--mmdelay <ms>`**: 单向延迟（毫秒）
+  - 示例：`--mmdelay 100` 表示 100ms 延迟
+
+- **`--mmloss <uplink> <downlink>`**: 丢包率（0.0-1.0）
+  - 示例：`--mmloss 0.01 0.01` 表示上行和下行各 1% 丢包率
+  - **注意**：必须提供两个值（上行和下行）
+
+- **`--mmlink <uplink_trace> <downlink_trace>`**: 链路带宽 trace 文件
+  - 示例：`--mmlink uplink.downlink downlink.trace`
+  - trace 文件格式参考 mahimahi 文档
+
+### mahimahi 命令嵌套顺序
+
+脚本内部会按以下顺序嵌套 mahimahi 命令：
+1. 最外层：`mm-link`（如果指定）
+2. 中间层：`mm-delay`（如果指定）
+3. 内层：`mm-loss uplink` 和 `mm-loss downlink`（如果指定）
+
+这样可以正确模拟复杂的网络条件。
+
+## 视频质量评估
+
+所有 client 脚本在接收完成后会自动调用 `scripts/evaluate.sh` 进行质量评估。
+
+### 自动评估
+
+client 脚本会自动执行以下步骤：
+
+1. 将接收到的 `received.h264` 转换为 MP4（使用 FFmpeg 重新编码修复）
+2. 计算 PSNR（峰值信噪比）
+3. 计算 SSIM（结构相似性）
+4. 计算 VMAF（视频多方法评估融合，如果支持）
+
+评估结果保存在 session 目录下：
+- `psnr.log`: PSNR 逐帧数据
+- `ssim.log`: SSIM 逐帧数据
+- `vmaf.json`: VMAF 详细数据（JSON 格式）
+
+### 手动评估
+
+如果需要手动运行评估：
+
+```bash
+./scripts/evaluate.sh <received.h264> <reference.mp4> <fps>
+```
+
+示例：
+```bash
+./scripts/evaluate.sh session_gcc_2601291323/received.h264 assets/Ultra.mp4 30
+```
+
+## 对比实验
+
+### 实验流程
+
+1. **准备测试视频**：
+   ```bash
+   # 确保有测试视频文件
+   ls assets/Ultra.mp4
+   ```
+
+2. **运行不同算法的实验**（在同一网络条件下）：
+   ```bash
+   # 终端 1: GCC
+   ./scripts/server-gcc.sh --video assets/Ultra.mp4 --mmdelay 100 --mmloss 0.01 0.01
+   # 终端 2: GCC client
+   ./scripts/client-gcc.sh --video assets/Ultra.mp4
+   
+   # 终端 1: NDTC
+   ./scripts/server-ndtc.sh --video assets/Ultra.mp4 --mmdelay 100 --mmloss 0.01 0.01
+   # 终端 2: NDTC client
+   ./scripts/client-ndtc.sh --video assets/Ultra.mp4
+   
+   # 重复其他算法...
+   ```
+
+3. **对比结果**：
+   - 查看各 session 目录下的 metrics CSV 文件
+   - 对比 PSNR/SSIM/VMAF 评估结果
+   - 分析帧延迟、丢包率、有效码率等指标
+
+### Session 目录结构
+
+每个实验会创建一个 session 目录（格式：`session_{algorithm}_{timestamp}`），包含：
+
+```
+session_gcc_2601291323/
+├── offer.txt              # WebRTC offer
+├── answer.txt             # WebRTC answer
+├── received.h264          # 接收到的原始 H.264 流
+├── repaired.mp4           # 修复后的 MP4（由 evaluate.sh 生成）
+├── psnr.log              # PSNR 评估结果
+├── ssim.log              # SSIM 评估结果
+├── vmaf.json             # VMAF 评估结果（如果支持）
+└── {algorithm}_server_metrics.csv  # Server 端统计（如果实现）
+```
+
+### 对比指标
+
+可以对比以下指标：
+
+- **视频质量**：PSNR、SSIM、VMAF（平均值和分布）
+- **帧延迟**：平均延迟、P95/P99 延迟
+- **码率利用率**：有效码率、峰值码率
+- **丢包率**：网络丢包、重传率
+- **卡顿率**：Stall rate
 
 ## 手动运行方式（不使用脚本）
 
@@ -122,6 +411,8 @@ echo "offer_base64_string" | ./client -ip 192.168.100.2
 
 ## 视频质量评估（PSNR / SSIM / VMAF）
 
+> **注意**：使用脚本时，评估会自动执行。本节介绍手动评估方法。
+
 接收到的视频文件（`received.h264`）可以用 FFmpeg 进行质量评估。
 
 ### 准备工作
@@ -129,12 +420,14 @@ echo "offer_base64_string" | ./client -ip 192.168.100.2
 1. **将接收到的 H264 文件封装为 MP4**：
 ```bash
 # 假设帧率为 30fps（根据实际编码帧率调整）
-ffmpeg -fflags +genpts -r 30 -i received.h264 -c:v copy received.mp4
+# 注意：使用重新编码而不是 copy，以修复可能的流错误
+ffmpeg -fflags +genpts -err_detect ignore_err -r 30 -i received.h264 \
+  -c:v libx264 -preset veryfast -crf 18 repaired.mp4
 ```
 
 2. **准备参考视频**：
    - 使用原始视频文件 `Ultra.mp4` 作为参考
-   - 或者，如果需要完全相同的编码参数，可以在 server 端同时保存编码后的 H264
+   - 确保参考视频与接收视频的分辨率、帧率一致
 
 ### 计算 PSNR（峰值信噪比）
 
@@ -194,45 +487,26 @@ ffmpeg -i received.mp4 -i Ultra.mp4 \
 3. **VMAF 模型**：不同版本的 VMAF 模型可能给出不同的分数，建议使用相同版本进行比较
 4. **性能**：VMAF 计算较慢，建议先用 PSNR/SSIM 快速评估
 
-### 示例脚本
+### 使用项目自带的评估脚本
 
-创建一个评估脚本 `evaluate.sh`：
+项目已提供 `scripts/evaluate.sh` 脚本，使用方法：
 
 ```bash
-#!/bin/bash
-RECEIVED="$1"
-REFERENCE="$2"
-FPS="${3:-30}"
-
-# 封装接收到的 H264
-echo "Converting received.h264 to MP4..."
-ffmpeg -y -fflags +genpts -r $FPS -i "$RECEIVED" -c:v copy received.mp4
-
-# 计算指标
-echo "Calculating PSNR..."
-ffmpeg -i received.mp4 -i "$REFERENCE" -lavfi "psnr=stats_file=psnr.log" -f null - 2>&1 | grep "average:"
-
-echo "Calculating SSIM..."
-ffmpeg -i received.mp4 -i "$REFERENCE" -lavfi "ssim=stats_file=ssim.log" -f null - 2>&1 | grep "SSIM"
-
-echo "Calculating VMAF..."
-ffmpeg -i received.mp4 -i "$REFERENCE" \
-  -lavfi "libvmaf=log_path=vmaf.json:log_fmt=json" \
-  -f null - 2>&1 | grep "VMAF"
-
-echo "Results saved to: psnr.log, ssim.log, vmaf.json"
+./scripts/evaluate.sh <received.h264> <reference.mp4> <fps>
 ```
 
-**使用方法**：
+示例：
 ```bash
-./evaluate.sh session_XXX/received.h264 Ultra.mp4 30
+./scripts/evaluate.sh session_gcc_2601291323/received.h264 assets/Ultra.mp4 30
 ```
 
 脚本会自动：
-1. 将 `received.h264` 封装为 MP4
-2. 计算 PSNR 并保存到 `*_psnr.log`
-3. 计算 SSIM 并保存到 `*_ssim.log`
-4. 计算 VMAF 并保存到 `*_vmaf.json`（如果 libvmaf 可用）
+1. 将 `received.h264` 转换为 MP4（使用重新编码修复）
+2. 计算 PSNR 并保存到 `psnr.log`
+3. 计算 SSIM 并保存到 `ssim.log`
+4. 计算 VMAF 并保存到 `vmaf.json`（如果 libvmaf 可用）
+
+**注意**：client 脚本会自动调用此评估脚本，通常不需要手动运行。
 
 ## 注意事项
 
