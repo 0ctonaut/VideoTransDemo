@@ -88,21 +88,26 @@ func main() {
 	}()
 
 	iceConnectedCtx, iceConnectedCtxCancel := context.WithCancel(context.Background())
+	connectionClosedCtx, connectionClosedCancel := context.WithCancel(context.Background())
 
 	setupPeerConnectionHandlers(peerConnection, nil, func(connectionState webrtc.ICEConnectionState) {
 		fmt.Fprintf(os.Stderr, "ICE Connection State: %s\n", connectionState.String())
 		if connectionState == webrtc.ICEConnectionStateConnected {
 			fmt.Fprintf(os.Stderr, "ICE connection established!\n")
 			iceConnectedCtxCancel()
-		} else if connectionState == webrtc.ICEConnectionStateFailed {
-			fmt.Fprintf(os.Stderr, "ERROR: ICE connection failed!\n")
+		} else if connectionState == webrtc.ICEConnectionStateFailed || connectionState == webrtc.ICEConnectionStateDisconnected || connectionState == webrtc.ICEConnectionStateClosed {
+			fmt.Fprintf(os.Stderr, "[GCC] ICE connection closed/disconnected/failed, calling connectionClosedCancel()...\n")
+			connectionClosedCancel()
+			fmt.Fprintf(os.Stderr, "[GCC] connectionClosedCancel() called, context should be cancelled now\n")
 		}
 	}, func(s webrtc.PeerConnectionState) {
 		fmt.Fprintf(os.Stderr, "Peer Connection State: %s\n", s.String())
 		if s == webrtc.PeerConnectionStateConnected {
 			fmt.Fprintf(os.Stderr, "Peer connection established!\n")
-		} else if s == webrtc.PeerConnectionStateFailed {
-			fmt.Fprintf(os.Stderr, "ERROR: Peer connection failed!\n")
+		} else if s == webrtc.PeerConnectionStateFailed || s == webrtc.PeerConnectionStateClosed || s == webrtc.PeerConnectionStateDisconnected {
+			fmt.Fprintf(os.Stderr, "[GCC] Peer connection closed/disconnected/failed, calling connectionClosedCancel()...\n")
+			connectionClosedCancel()
+			fmt.Fprintf(os.Stderr, "[GCC] connectionClosedCancel() called, context should be cancelled now\n")
 		}
 	})
 
@@ -191,11 +196,16 @@ func main() {
 	defer freeVideoCoding()
 
 	videoDone := make(chan bool, 1)
-	go writeVideoToTrackWithGCCMetrics(videoTrack, *loop, videoDone)
+	go writeVideoToTrackWithGCCMetrics(videoTrack, *loop, videoDone, connectionClosedCtx)
 
 	select {
 	case <-videoDone:
 		fmt.Fprintf(os.Stderr, "Video streaming completed, closing connection...\n")
+		if err := peerConnection.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error closing peer connection: %v\n", err)
+		}
+	case <-connectionClosedCtx.Done():
+		fmt.Fprintf(os.Stderr, "[GCC] Main: connectionClosedCtx.Done() triggered, stopping video streaming...\n")
 		if err := peerConnection.Close(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error closing peer connection: %v\n", err)
 		}
@@ -209,7 +219,7 @@ func main() {
 
 // writeVideoToTrackWithGCCMetrics 与原 writeVideoToTrack 几乎相同，目前只负责按帧率发送 H.264。
 // 为后续 GCC 实验预留扩展点（例如在这里根据带宽估计调整编码参数）。
-func writeVideoToTrackWithGCCMetrics(track *webrtc.TrackLocalStaticSample, loopVideo bool, done chan<- bool) {
+func writeVideoToTrackWithGCCMetrics(track *webrtc.TrackLocalStaticSample, loopVideo bool, done chan<- bool, ctx context.Context) {
 	frameRate := videoStream.AvgFrameRate()
 	if frameRate.Num() == 0 {
 		frameRate = astiav.NewRational(30, 1)
@@ -219,7 +229,31 @@ func writeVideoToTrackWithGCCMetrics(track *webrtc.TrackLocalStaticSample, loopV
 	ticker := time.NewTicker(h264FrameDuration)
 	defer ticker.Stop()
 
-	for range ticker.C {
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Fprintf(os.Stderr, "[GCC] Connection closed context triggered, stopping video streaming...\n")
+			select {
+			case done <- true:
+			default:
+			}
+			return
+		case <-ticker.C:
+			// 继续处理这一帧
+		}
+		
+		// 检查 context 是否已取消（在 ticker 触发后再次检查）
+		select {
+		case <-ctx.Done():
+			fmt.Fprintf(os.Stderr, "[GCC] Connection closed after ticker, stopping video streaming...\n")
+			select {
+			case done <- true:
+			default:
+			}
+			return
+		default:
+		}
+		
 		decodePacket.Unref()
 
 		if err = inputFormatContext.ReadFrame(decodePacket); err != nil {
@@ -293,8 +327,13 @@ func writeVideoToTrackWithGCCMetrics(track *webrtc.TrackLocalStaticSample, loopV
 
 				if err = track.WriteSample(media.Sample{Data: encodePacket.Data(), Duration: h264FrameDuration}); err != nil {
 					encodePacket.Free()
-					fmt.Fprintf(os.Stderr, "Error writing sample: %v\n", err)
-					continue
+					fmt.Fprintf(os.Stderr, "Error writing sample (connection may be closed): %v\n", err)
+					// 如果写入失败，可能是连接已断开，退出循环
+					select {
+					case done <- true:
+					default:
+					}
+					return
 				}
 				encodePacket.Free()
 			}

@@ -88,21 +88,24 @@ func main() {
 	}()
 
 	iceConnectedCtx, iceConnectedCtxCancel := context.WithCancel(context.Background())
+	connectionClosedCtx, connectionClosedCancel := context.WithCancel(context.Background())
 
 	setupPeerConnectionHandlers(peerConnection, nil, func(connectionState webrtc.ICEConnectionState) {
 		fmt.Fprintf(os.Stderr, "ICE Connection State: %s\n", connectionState.String())
 		if connectionState == webrtc.ICEConnectionStateConnected {
 			fmt.Fprintf(os.Stderr, "ICE connection established!\n")
 			iceConnectedCtxCancel()
-		} else if connectionState == webrtc.ICEConnectionStateFailed {
-			fmt.Fprintf(os.Stderr, "ERROR: ICE connection failed!\n")
+		} else if connectionState == webrtc.ICEConnectionStateFailed || connectionState == webrtc.ICEConnectionStateDisconnected || connectionState == webrtc.ICEConnectionStateClosed {
+			fmt.Fprintf(os.Stderr, "ICE connection closed/disconnected/failed, stopping video streaming...\n")
+			connectionClosedCancel()
 		}
 	}, func(s webrtc.PeerConnectionState) {
 		fmt.Fprintf(os.Stderr, "Peer Connection State: %s\n", s.String())
 		if s == webrtc.PeerConnectionStateConnected {
 			fmt.Fprintf(os.Stderr, "Peer connection established!\n")
-		} else if s == webrtc.PeerConnectionStateFailed {
-			fmt.Fprintf(os.Stderr, "ERROR: Peer connection failed!\n")
+		} else if s == webrtc.PeerConnectionStateFailed || s == webrtc.PeerConnectionStateClosed || s == webrtc.PeerConnectionStateDisconnected {
+			fmt.Fprintf(os.Stderr, "Peer connection closed/disconnected/failed, stopping video streaming...\n")
+			connectionClosedCancel()
 		}
 	})
 
@@ -212,11 +215,16 @@ func main() {
 	}
 
 	videoDone := make(chan bool, 1)
-	go writeVideoToTrackBurst(videoTrack, *loop, burstCtrl, metricsWriter, videoDone)
+	go writeVideoToTrackBurst(videoTrack, *loop, burstCtrl, metricsWriter, videoDone, connectionClosedCtx)
 
 	select {
 	case <-videoDone:
 		fmt.Fprintf(os.Stderr, "Video streaming completed, closing connection...\n")
+		if err := peerConnection.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error closing peer connection: %v\n", err)
+		}
+	case <-connectionClosedCtx.Done():
+		fmt.Fprintf(os.Stderr, "Connection closed/disconnected, stopping video streaming...\n")
 		if err := peerConnection.Close(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error closing peer connection: %v\n", err)
 		}
@@ -327,7 +335,7 @@ func (m *BurstMetricsWriter) Close() {
 
 // writeVideoToTrackBurst 基于 FFmpeg 解码+编码，将 H.264 帧发送到 WebRTC video track，
 // 同时为每一帧更新 BurstRTC 控制器，记录发送统计并应用 per-frame 预算控制。
-func writeVideoToTrackBurst(track *webrtc.TrackLocalStaticSample, loopVideo bool, ctrl *BurstController, metricsWriter *BurstMetricsWriter, done chan<- bool) {
+func writeVideoToTrackBurst(track *webrtc.TrackLocalStaticSample, loopVideo bool, ctrl *BurstController, metricsWriter *BurstMetricsWriter, done chan<- bool, ctx context.Context) {
 	frameRate := videoStream.AvgFrameRate()
 	if frameRate.Num() == 0 {
 		frameRate = astiav.NewRational(30, 1)
@@ -339,7 +347,17 @@ func writeVideoToTrackBurst(track *webrtc.TrackLocalStaticSample, loopVideo bool
 
 	frameID := 0
 
-	for range ticker.C {
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Fprintf(os.Stderr, "Connection closed, stopping video streaming...\n")
+			select {
+			case done <- true:
+			default:
+			}
+			return
+		case <-ticker.C:
+		}
 		decodePacket.Unref()
 
 		if err = inputFormatContext.ReadFrame(decodePacket); err != nil {
@@ -387,10 +405,16 @@ func writeVideoToTrackBurst(track *webrtc.TrackLocalStaticSample, loopVideo bool
 			frameID++
 			sendStart := time.Now()
 
-			// 从 BurstRTC 控制器获取当前帧的预算和 burst fraction
+			// 闭环控制：从 BurstRTC 控制器获取当前帧的预算和 burst fraction
 			targetBits, burstFraction := ctrl.NextFrameBudget()
 
+			// 初始化编码器（如果还没初始化）
 			initVideoEncoding()
+
+			// 根据预算调整编码器质量（闭环控制的关键步骤）
+			if err = updateEncoderForBudgetBurst(targetBits); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: Failed to update encoder for budget %d: %v, using default\n", targetBits, err)
+			}
 
 			if err = softwareScaleContext.ScaleFrame(decodeFrame, scaledFrame); err != nil {
 				fmt.Fprintf(os.Stderr, "Error scaling frame: %v\n", err)
@@ -406,6 +430,7 @@ func writeVideoToTrackBurst(track *webrtc.TrackLocalStaticSample, loopVideo bool
 			}
 
 			var sentBitsForFrame int
+			var allPackets [][]byte // 收集所有 packet，用于 burst 发送
 
 			for {
 				encodePacket = astiav.AllocPacket()
@@ -421,14 +446,62 @@ func writeVideoToTrackBurst(track *webrtc.TrackLocalStaticSample, loopVideo bool
 
 				data := encodePacket.Data()
 				sentBitsForFrame += len(data) * 8
-
-				// 当前版本：直接发送所有数据（后续可以按 burstFraction 实现真正的 burst/pacing 分离）
-				if err = track.WriteSample(media.Sample{Data: data, Duration: h264FrameDuration}); err != nil {
-					encodePacket.Free()
-					fmt.Fprintf(os.Stderr, "Error writing sample: %v\n", err)
-					continue
-				}
+				allPackets = append(allPackets, data)
 				encodePacket.Free()
+			}
+
+			// 应用 burst fraction：控制发送 pattern
+			// burstFraction 表示在帧间隔内，应该用多长时间来发送数据
+			// 例如：burstFraction=0.5 表示用一半的帧间隔时间发送，另一半时间 sleep
+			burstSendDuration := time.Duration(float64(h264FrameDuration) * burstFraction)
+			
+			if len(allPackets) > 0 && burstSendDuration > 0 {
+				// 计算每个 packet 之间的发送间隔
+				packetInterval := burstSendDuration / time.Duration(len(allPackets))
+				if packetInterval < 0 {
+					packetInterval = 0
+				}
+
+				burstStart := time.Now()
+				for i, pktData := range allPackets {
+					if err = track.WriteSample(media.Sample{Data: pktData, Duration: h264FrameDuration}); err != nil {
+						fmt.Fprintf(os.Stderr, "Error writing sample (connection may be closed): %v\n", err)
+						// 如果写入失败，可能是连接已断开，退出循环
+						select {
+						case done <- true:
+						default:
+						}
+						return
+					}
+					
+					// 在 packet 之间 sleep，控制 burst 发送节奏
+					// 最后一个 packet 不需要 sleep
+					if i < len(allPackets)-1 && packetInterval > 0 {
+						time.Sleep(packetInterval)
+					}
+				}
+				actualBurstDuration := time.Since(burstStart)
+				
+				// 如果实际发送时间小于预期，在帧间隔剩余时间内 sleep
+				if actualBurstDuration < burstSendDuration {
+					remainingSleep := burstSendDuration - actualBurstDuration
+					if remainingSleep > 0 {
+						time.Sleep(remainingSleep)
+					}
+				}
+			} else {
+				// fallback：直接发送所有 packet
+				for _, pktData := range allPackets {
+					if err = track.WriteSample(media.Sample{Data: pktData, Duration: h264FrameDuration}); err != nil {
+						fmt.Fprintf(os.Stderr, "Error writing sample (connection may be closed): %v\n", err)
+						// 如果写入失败，可能是连接已断开，退出循环
+						select {
+						case done <- true:
+						default:
+						}
+						return
+					}
+				}
 			}
 
 			sendEnd := time.Now()

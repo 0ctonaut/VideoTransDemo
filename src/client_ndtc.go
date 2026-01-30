@@ -114,13 +114,13 @@ func main() {
 	//  - 仍然输出 ICE / Connection 状态日志
 	//  - 当 ICE / PeerConnection 进入 Failed 状态时，主动在客户端调用 Close()
 	//    以便唤醒 ReadRTP()，让 writeH264ToFile 正常返回，从而触发 recvDone 关闭
-	setupPeerConnectionHandlers(
+		setupPeerConnectionHandlers(
 		peerConnection,
 		nil, // ICE candidate handler 使用默认日志
 		func(connectionState webrtc.ICEConnectionState) {
 			fmt.Fprintf(os.Stderr, "ICE Connection State: %s\n", connectionState.String())
-			if connectionState == webrtc.ICEConnectionStateFailed {
-				fmt.Fprintf(os.Stderr, "ERROR: ICE connection failed (client), closing peer connection...\n")
+			if connectionState == webrtc.ICEConnectionStateFailed || connectionState == webrtc.ICEConnectionStateDisconnected || connectionState == webrtc.ICEConnectionStateClosed {
+				fmt.Fprintf(os.Stderr, "[NDTC Client] ICE connection closed/disconnected/failed, closing peer connection...\n")
 				if cErr := peerConnection.Close(); cErr != nil {
 					fmt.Fprintf(os.Stderr, "Error closing peer connection in ICE handler: %v\n", cErr)
 				}
@@ -128,8 +128,8 @@ func main() {
 		},
 		func(s webrtc.PeerConnectionState) {
 			fmt.Fprintf(os.Stderr, "Peer Connection State: %s\n", s.String())
-			if s == webrtc.PeerConnectionStateFailed {
-				fmt.Fprintf(os.Stderr, "ERROR: Peer connection failed (client), closing peer connection...\n")
+			if s == webrtc.PeerConnectionStateFailed || s == webrtc.PeerConnectionStateClosed || s == webrtc.PeerConnectionStateDisconnected {
+				fmt.Fprintf(os.Stderr, "[NDTC Client] Peer connection closed/disconnected/failed, closing peer connection...\n")
 				if cErr := peerConnection.Close(); cErr != nil {
 					fmt.Fprintf(os.Stderr, "Error closing peer connection in state handler: %v\n", cErr)
 				}

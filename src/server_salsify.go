@@ -88,21 +88,26 @@ func main() {
 	}()
 
 	iceConnectedCtx, iceConnectedCtxCancel := context.WithCancel(context.Background())
+	connectionClosedCtx, connectionClosedCancel := context.WithCancel(context.Background())
 
 	setupPeerConnectionHandlers(peerConnection, nil, func(connectionState webrtc.ICEConnectionState) {
 		fmt.Fprintf(os.Stderr, "ICE Connection State: %s\n", connectionState.String())
 		if connectionState == webrtc.ICEConnectionStateConnected {
 			fmt.Fprintf(os.Stderr, "ICE connection established!\n")
 			iceConnectedCtxCancel()
-		} else if connectionState == webrtc.ICEConnectionStateFailed {
-			fmt.Fprintf(os.Stderr, "ERROR: ICE connection failed!\n")
+		} else if connectionState == webrtc.ICEConnectionStateFailed || connectionState == webrtc.ICEConnectionStateDisconnected || connectionState == webrtc.ICEConnectionStateClosed {
+			fmt.Fprintf(os.Stderr, "[Salsify] ICE connection closed/disconnected/failed, calling connectionClosedCancel()...\n")
+			connectionClosedCancel()
+			fmt.Fprintf(os.Stderr, "[Salsify] connectionClosedCancel() called, context should be cancelled now\n")
 		}
 	}, func(s webrtc.PeerConnectionState) {
 		fmt.Fprintf(os.Stderr, "Peer Connection State: %s\n", s.String())
 		if s == webrtc.PeerConnectionStateConnected {
 			fmt.Fprintf(os.Stderr, "Peer connection established!\n")
-		} else if s == webrtc.PeerConnectionStateFailed {
-			fmt.Fprintf(os.Stderr, "ERROR: Peer connection failed!\n")
+		} else if s == webrtc.PeerConnectionStateFailed || s == webrtc.PeerConnectionStateClosed || s == webrtc.PeerConnectionStateDisconnected {
+			fmt.Fprintf(os.Stderr, "[Salsify] Peer connection closed/disconnected/failed, calling connectionClosedCancel()...\n")
+			connectionClosedCancel()
+			fmt.Fprintf(os.Stderr, "[Salsify] connectionClosedCancel() called, context should be cancelled now\n")
 		}
 	})
 
@@ -199,11 +204,16 @@ func main() {
 	})
 
 	videoDone := make(chan bool, 1)
-	go writeVideoToTrackSalsify(videoTrack, *loop, ctrl, videoDone)
+	go writeVideoToTrackSalsify(videoTrack, *loop, ctrl, videoDone, connectionClosedCtx)
 
 	select {
 	case <-videoDone:
 		fmt.Fprintf(os.Stderr, "Video streaming completed, closing connection...\n")
+		if err := peerConnection.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error closing peer connection: %v\n", err)
+		}
+	case <-connectionClosedCtx.Done():
+		fmt.Fprintf(os.Stderr, "[Salsify] Main: connectionClosedCtx.Done() triggered, stopping video streaming...\n")
 		if err := peerConnection.Close(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error closing peer connection: %v\n", err)
 		}
@@ -217,7 +227,7 @@ func main() {
 
 // writeVideoToTrackSalsify 在现有 FFmpeg 管线基础上，增加按帧 bit 统计并喂给 SalsifyController。
 // 当前版本仍然只编码单个候选，但已经按帧调用 NextFrameBudget 并打印预算，便于后续扩展为多候选选择。
-func writeVideoToTrackSalsify(track *webrtc.TrackLocalStaticSample, loopVideo bool, ctrl *SalsifyController, done chan<- bool) {
+func writeVideoToTrackSalsify(track *webrtc.TrackLocalStaticSample, loopVideo bool, ctrl *SalsifyController, done chan<- bool, ctx context.Context) {
 	frameRate := videoStream.AvgFrameRate()
 	if frameRate.Num() == 0 {
 		frameRate = astiav.NewRational(30, 1)
@@ -229,7 +239,31 @@ func writeVideoToTrackSalsify(track *webrtc.TrackLocalStaticSample, loopVideo bo
 
 	frameID := 0
 
-	for range ticker.C {
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Fprintf(os.Stderr, "[Salsify] Connection closed context triggered, stopping video streaming...\n")
+			select {
+			case done <- true:
+			default:
+			}
+			return
+		case <-ticker.C:
+			// 继续处理这一帧
+		}
+		
+		// 检查 context 是否已取消（在 ticker 触发后再次检查）
+		select {
+		case <-ctx.Done():
+			fmt.Fprintf(os.Stderr, "[Salsify] Connection closed after ticker, stopping video streaming...\n")
+			select {
+			case done <- true:
+			default:
+			}
+			return
+		default:
+		}
+		
 		decodePacket.Unref()
 
 		if err = inputFormatContext.ReadFrame(decodePacket); err != nil {
@@ -277,11 +311,14 @@ func writeVideoToTrackSalsify(track *webrtc.TrackLocalStaticSample, loopVideo bo
 			frameID++
 			frameSendStart := time.Now()
 
-			// 查询当前帧预算（目前仅用于日志，后续可用于真正的多候选选择）
+			// 闭环控制：获取当前帧预算
 			budgetBits := ctrl.NextFrameBudget()
 			fmt.Fprintf(os.Stderr, "[Salsify] Frame %d budget: %d bits\n", frameID, budgetBits)
 
-			initVideoEncoding()
+			// 初始化缩放上下文（如果还没初始化）
+			if softwareScaleContext == nil {
+				initVideoEncoding()
+			}
 
 			if err = softwareScaleContext.ScaleFrame(decodeFrame, scaledFrame); err != nil {
 				fmt.Fprintf(os.Stderr, "Error scaling frame: %v\n", err)
@@ -291,34 +328,49 @@ func writeVideoToTrackSalsify(track *webrtc.TrackLocalStaticSample, loopVideo bo
 			pts++
 			scaledFrame.SetPts(pts)
 
-			if err = encodeCodecContext.SendFrame(scaledFrame); err != nil {
-				fmt.Fprintf(os.Stderr, "Error sending frame to encoder: %v\n", err)
+			// 多候选编码：生成多个不同 QP 的编码候选
+			candidates, err := encodeMultipleCandidates(scaledFrame, pts)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error generating encoding candidates: %v\n", err)
 				continue
 			}
 
-			var sentBitsForFrame int
-
-			for {
-				encodePacket = astiav.AllocPacket()
-				if err = encodeCodecContext.ReceivePacket(encodePacket); err != nil {
-					if errors.Is(err, astiav.ErrEof) || errors.Is(err, astiav.ErrEagain) {
-						encodePacket.Free()
-						break
+			// 根据预算选择候选：选择不超过预算的最高质量候选
+			var selectedCandidate *EncodedCandidate
+			for i := range candidates {
+				cand := &candidates[i]
+				if cand.Bits <= budgetBits {
+					// 找到不超过预算的候选，选择 QP 最低的（质量最高）
+					if selectedCandidate == nil || cand.QP < selectedCandidate.QP {
+						selectedCandidate = cand
 					}
-					encodePacket.Free()
-					fmt.Fprintf(os.Stderr, "Error receiving packet: %v\n", err)
-					break
 				}
+			}
 
-				data := encodePacket.Data()
-				sentBitsForFrame += len(data) * 8
+			// 如果所有候选都超预算，选择最小的一个（记录 budget violation）
+			if selectedCandidate == nil {
+				selectedCandidate = &candidates[len(candidates)-1] // 选择 QP 最高的（最小）
+				fmt.Fprintf(os.Stderr, "[Salsify] Frame %d: All candidates exceed budget, selecting smallest (QP=%d, bits=%d)\n",
+					frameID, selectedCandidate.QP, selectedCandidate.Bits)
+			} else {
+				fmt.Fprintf(os.Stderr, "[Salsify] Frame %d: Selected candidate QP=%d, bits=%d (budget=%d)\n",
+					frameID, selectedCandidate.QP, selectedCandidate.Bits, budgetBits)
+			}
 
-				if err = track.WriteSample(media.Sample{Data: data, Duration: h264FrameDuration}); err != nil {
-					encodePacket.Free()
-					fmt.Fprintf(os.Stderr, "Error writing sample: %v\n", err)
-					continue
+			// 发送选中的候选：按 packet（NALU）边界发送
+			sentBitsForFrame := selectedCandidate.Bits
+
+			// 将候选的每个 packet（对应一个 NALU）逐个发送
+			for _, pktData := range selectedCandidate.Packets {
+				if err = track.WriteSample(media.Sample{Data: pktData, Duration: h264FrameDuration}); err != nil {
+					fmt.Fprintf(os.Stderr, "Error writing sample (connection may be closed): %v\n", err)
+					// 如果写入失败，可能是连接已断开，退出循环
+					select {
+					case done <- true:
+					default:
+					}
+					return
 				}
-				encodePacket.Free()
 			}
 
 			frameSendEnd := time.Now()

@@ -139,6 +139,96 @@ func initVideoEncoding() {
 	scaledFrame = astiav.AllocFrame()
 }
 
+// updateEncoderForBudget 根据预算 bits 动态调整编码器质量。
+// 采用工程近似：将预算映射到 CRF（Constant Rate Factor）值。
+// 预算越高 -> CRF 越低 -> 质量越高。
+// 为了性能，只在 CRF 需要显著变化时才重新配置编码器。
+var (
+	currentCRF     int = -1
+	lastBudgetBits int = -1
+)
+
+func updateEncoderForBudget(targetBits int) error {
+	// 简单的映射：根据目标 bits 估算 CRF
+	// 假设：30fps, 1920x1080, 目标 bits 范围 [50k, 500k]
+	// CRF 范围通常 [18, 32]，值越低质量越高
+	// 这里用线性映射：bits 高 -> CRF 低
+	const minBits = 50_000
+	const maxBits = 500_000
+	const minCRF = 18
+	const maxCRF = 32
+
+	// 将预算映射到 CRF
+	var targetCRF int
+	if targetBits <= minBits {
+		targetCRF = maxCRF // 低预算 -> 高 CRF -> 低质量
+	} else if targetBits >= maxBits {
+		targetCRF = minCRF // 高预算 -> 低 CRF -> 高质量
+	} else {
+		// 线性插值
+		ratio := float64(targetBits-minBits) / float64(maxBits-minBits)
+		targetCRF = maxCRF - int(ratio*float64(maxCRF-minCRF))
+	}
+
+	// 如果 CRF 变化不大（±2），不重新配置，避免频繁重建编码器
+	if currentCRF >= 0 && abs(currentCRF-targetCRF) <= 2 {
+		return nil
+	}
+
+	// 需要重新配置编码器
+	if encodeCodecContext != nil {
+		// 关闭旧编码器
+		encodeCodecContext.Free()
+		encodeCodecContext = nil
+	}
+
+	h264Encoder := astiav.FindEncoder(astiav.CodecIDH264)
+	if h264Encoder == nil {
+		return fmt.Errorf("No H264 Encoder Found")
+	}
+
+	if encodeCodecContext = astiav.AllocCodecContext(h264Encoder); encodeCodecContext == nil {
+		return fmt.Errorf("Failed to AllocCodecContext Encoder")
+	}
+
+	encodeCodecContext.SetPixelFormat(astiav.PixelFormatYuv420P)
+	encodeCodecContext.SetSampleAspectRatio(decodeCodecContext.SampleAspectRatio())
+	encodeCodecContext.SetTimeBase(astiav.NewRational(1, 30))
+	encodeCodecContext.SetWidth(decodeCodecContext.Width())
+	encodeCodecContext.SetHeight(decodeCodecContext.Height())
+
+	encodeCodecContextDictionary := astiav.NewDictionary()
+	if err = encodeCodecContextDictionary.Set("preset", "ultrafast", astiav.NewDictionaryFlags()); err != nil {
+		return err
+	}
+	if err = encodeCodecContextDictionary.Set("tune", "zerolatency", astiav.NewDictionaryFlags()); err != nil {
+		return err
+	}
+	if err = encodeCodecContextDictionary.Set("bf", "0", astiav.NewDictionaryFlags()); err != nil {
+		return err
+	}
+	// 设置 CRF
+	crfStr := fmt.Sprintf("%d", targetCRF)
+	if err = encodeCodecContextDictionary.Set("crf", crfStr, astiav.NewDictionaryFlags()); err != nil {
+		return err
+	}
+
+	if err = encodeCodecContext.Open(h264Encoder, encodeCodecContextDictionary); err != nil {
+		return fmt.Errorf("Failed to open encoder with CRF %d: %v", targetCRF, err)
+	}
+
+	currentCRF = targetCRF
+	lastBudgetBits = targetBits
+	return nil
+}
+
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
 // freeVideoCoding 释放 FFmpeg 相关的全局状态。
 func freeVideoCoding() {
 	if inputFormatContext != nil {

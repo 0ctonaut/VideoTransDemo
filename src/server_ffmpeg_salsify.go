@@ -9,7 +9,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"os"
 
 	"github.com/asticode/go-astiav"
 )
@@ -137,6 +139,116 @@ func initVideoEncoding() {
 	}
 
 	scaledFrame = astiav.AllocFrame()
+}
+
+// EncodedCandidate 表示一个编码候选（不同 QP 下的编码结果）
+type EncodedCandidate struct {
+	QP     int      // 使用的 QP 值（用于质量排序）
+	Bits   int      // 编码后的比特数
+	Packets [][]byte // 编码后的 H.264 packet 列表（每个 packet 对应一个 NALU）
+}
+
+// encodeFrameWithQP 使用指定的 QP 值编码一帧，返回编码后的 packet 列表和总比特数
+func encodeFrameWithQP(frame *astiav.Frame, framePts int64, qp int) ([][]byte, int, error) {
+	h264Encoder := astiav.FindEncoder(astiav.CodecIDH264)
+	if h264Encoder == nil {
+		return nil, 0, fmt.Errorf("No H264 Encoder Found")
+	}
+
+	encCtx := astiav.AllocCodecContext(h264Encoder)
+	if encCtx == nil {
+		return nil, 0, fmt.Errorf("Failed to AllocCodecContext Encoder")
+	}
+	defer encCtx.Free()
+
+	encCtx.SetPixelFormat(astiav.PixelFormatYuv420P)
+	encCtx.SetSampleAspectRatio(decodeCodecContext.SampleAspectRatio())
+	encCtx.SetTimeBase(astiav.NewRational(1, 30))
+	encCtx.SetWidth(decodeCodecContext.Width())
+	encCtx.SetHeight(decodeCodecContext.Height())
+
+	encDict := astiav.NewDictionary()
+	if err = encDict.Set("preset", "ultrafast", astiav.NewDictionaryFlags()); err != nil {
+		return nil, 0, err
+	}
+	if err = encDict.Set("tune", "zerolatency", astiav.NewDictionaryFlags()); err != nil {
+		return nil, 0, err
+	}
+	if err = encDict.Set("bf", "0", astiav.NewDictionaryFlags()); err != nil {
+		return nil, 0, err
+	}
+	// 使用固定 QP 模式
+	qpStr := fmt.Sprintf("%d", qp)
+	if err = encDict.Set("qp", qpStr, astiav.NewDictionaryFlags()); err != nil {
+		return nil, 0, err
+	}
+
+	if err = encCtx.Open(h264Encoder, encDict); err != nil {
+		return nil, 0, fmt.Errorf("Failed to open encoder with QP %d: %v", qp, err)
+	}
+
+	// 设置 PTS
+	frame.SetPts(framePts)
+
+	// 发送帧到编码器
+	if err = encCtx.SendFrame(frame); err != nil {
+		return nil, 0, fmt.Errorf("Error sending frame to encoder: %v", err)
+	}
+
+	// 收集所有编码后的 packet（保持 packet 边界）
+	var packets [][]byte
+	totalBits := 0
+
+	for {
+		pkt := astiav.AllocPacket()
+		if err = encCtx.ReceivePacket(pkt); err != nil {
+			if errors.Is(err, astiav.ErrEof) || errors.Is(err, astiav.ErrEagain) {
+				pkt.Free()
+				break
+			}
+			pkt.Free()
+			return nil, 0, fmt.Errorf("Error receiving packet: %v", err)
+		}
+
+		data := pkt.Data()
+		// 复制数据（因为 packet 会被释放）
+		dataCopy := make([]byte, len(data))
+		copy(dataCopy, data)
+		packets = append(packets, dataCopy)
+		totalBits += len(data) * 8
+		pkt.Free()
+	}
+
+	return packets, totalBits, nil
+}
+
+// encodeMultipleCandidates 对同一帧生成多个编码候选（使用不同的 QP 值）
+// 返回按 QP 排序的候选列表（QP 越低质量越高）
+func encodeMultipleCandidates(frame *astiav.Frame, framePts int64) ([]EncodedCandidate, error) {
+	// 定义几个 QP 档位：低 QP = 高质量，高 QP = 低质量
+	qpLevels := []int{20, 25, 30, 35} // 从高质量到低质量
+
+	var candidates []EncodedCandidate
+
+	for _, qp := range qpLevels {
+		packets, bits, err := encodeFrameWithQP(frame, framePts, qp)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to encode with QP %d: %v\n", qp, err)
+			continue
+		}
+
+		candidates = append(candidates, EncodedCandidate{
+			QP:      qp,
+			Bits:    bits,
+			Packets: packets,
+		})
+	}
+
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("Failed to generate any encoding candidates")
+	}
+
+	return candidates, nil
 }
 
 // freeVideoCoding 释放 FFmpeg 相关的全局状态。

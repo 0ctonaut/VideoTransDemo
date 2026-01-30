@@ -139,6 +139,85 @@ func initVideoEncoding() {
 	scaledFrame = astiav.AllocFrame()
 }
 
+// updateEncoderForBudget 根据预算 bits 动态调整编码器质量（与 NDTC 类似）
+var (
+	burstCurrentCRF     int = -1
+	burstLastBudgetBits int = -1
+)
+
+func updateEncoderForBudgetBurst(targetBits int) error {
+	const minBits = 50_000
+	const maxBits = 500_000
+	const minCRF = 18
+	const maxCRF = 32
+
+	var targetCRF int
+	if targetBits <= minBits {
+		targetCRF = maxCRF
+	} else if targetBits >= maxBits {
+		targetCRF = minCRF
+	} else {
+		ratio := float64(targetBits-minBits) / float64(maxBits-minBits)
+		targetCRF = maxCRF - int(ratio*float64(maxCRF-minCRF))
+	}
+
+	// 如果 CRF 变化不大（±2），不重新配置
+	if burstCurrentCRF >= 0 && absBurst(burstCurrentCRF-targetCRF) <= 2 {
+		return nil
+	}
+
+	// 需要重新配置编码器
+	if encodeCodecContext != nil {
+		encodeCodecContext.Free()
+		encodeCodecContext = nil
+	}
+
+	h264Encoder := astiav.FindEncoder(astiav.CodecIDH264)
+	if h264Encoder == nil {
+		return fmt.Errorf("No H264 Encoder Found")
+	}
+
+	if encodeCodecContext = astiav.AllocCodecContext(h264Encoder); encodeCodecContext == nil {
+		return fmt.Errorf("Failed to AllocCodecContext Encoder")
+	}
+
+	encodeCodecContext.SetPixelFormat(astiav.PixelFormatYuv420P)
+	encodeCodecContext.SetSampleAspectRatio(decodeCodecContext.SampleAspectRatio())
+	encodeCodecContext.SetTimeBase(astiav.NewRational(1, 30))
+	encodeCodecContext.SetWidth(decodeCodecContext.Width())
+	encodeCodecContext.SetHeight(decodeCodecContext.Height())
+
+	encodeCodecContextDictionary := astiav.NewDictionary()
+	if err = encodeCodecContextDictionary.Set("preset", "ultrafast", astiav.NewDictionaryFlags()); err != nil {
+		return err
+	}
+	if err = encodeCodecContextDictionary.Set("tune", "zerolatency", astiav.NewDictionaryFlags()); err != nil {
+		return err
+	}
+	if err = encodeCodecContextDictionary.Set("bf", "0", astiav.NewDictionaryFlags()); err != nil {
+		return err
+	}
+	crfStr := fmt.Sprintf("%d", targetCRF)
+	if err = encodeCodecContextDictionary.Set("crf", crfStr, astiav.NewDictionaryFlags()); err != nil {
+		return err
+	}
+
+	if err = encodeCodecContext.Open(h264Encoder, encodeCodecContextDictionary); err != nil {
+		return fmt.Errorf("Failed to open encoder with CRF %d: %v", targetCRF, err)
+	}
+
+	burstCurrentCRF = targetCRF
+	burstLastBudgetBits = targetBits
+	return nil
+}
+
+func absBurst(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
 // freeVideoCoding 释放 FFmpeg 相关的全局状态。
 func freeVideoCoding() {
 	if inputFormatContext != nil {
@@ -169,5 +248,6 @@ func freeVideoCoding() {
 		encodePacket.Free()
 	}
 }
+
 
 

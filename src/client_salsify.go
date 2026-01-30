@@ -110,8 +110,24 @@ func main() {
 		}
 	})
 
-	// 复用公共的 PeerConnection handler，输出 ICE / Connection 状态日志
-	setupPeerConnectionHandlers(peerConnection, nil, nil, nil)
+	// 设置连接状态监听，当连接断开时主动关闭 peerConnection，使 ReadRTP() 返回错误
+	setupPeerConnectionHandlers(peerConnection, nil, func(connectionState webrtc.ICEConnectionState) {
+		fmt.Fprintf(os.Stderr, "ICE Connection State: %s\n", connectionState.String())
+		if connectionState == webrtc.ICEConnectionStateFailed || connectionState == webrtc.ICEConnectionStateDisconnected || connectionState == webrtc.ICEConnectionStateClosed {
+			fmt.Fprintf(os.Stderr, "[Salsify Client] ICE connection closed/disconnected/failed, closing peer connection...\n")
+			if err := peerConnection.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error closing peer connection in ICE handler: %v\n", err)
+			}
+		}
+	}, func(s webrtc.PeerConnectionState) {
+		fmt.Fprintf(os.Stderr, "Peer Connection State: %s\n", s.String())
+		if s == webrtc.PeerConnectionStateFailed || s == webrtc.PeerConnectionStateClosed || s == webrtc.PeerConnectionStateDisconnected {
+			fmt.Fprintf(os.Stderr, "[Salsify Client] Peer connection closed/disconnected/failed, closing peer connection...\n")
+			if err := peerConnection.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error closing peer connection in state handler: %v\n", err)
+			}
+		}
+	})
 
 	// ========== 读取 Server 发送的 Offer ==========
 	offer := webrtc.SessionDescription{}

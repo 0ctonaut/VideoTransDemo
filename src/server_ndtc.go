@@ -83,21 +83,24 @@ func main() {
 	}()
 
 	iceConnectedCtx, iceConnectedCtxCancel := context.WithCancel(context.Background())
+	connectionClosedCtx, connectionClosedCancel := context.WithCancel(context.Background())
 
 	setupPeerConnectionHandlers(peerConnection, nil, func(connectionState webrtc.ICEConnectionState) {
 		fmt.Fprintf(os.Stderr, "ICE Connection State: %s\n", connectionState.String())
 		if connectionState == webrtc.ICEConnectionStateConnected {
 			fmt.Fprintf(os.Stderr, "ICE connection established!\n")
 			iceConnectedCtxCancel()
-		} else if connectionState == webrtc.ICEConnectionStateFailed {
-			fmt.Fprintf(os.Stderr, "ERROR: ICE connection failed!\n")
+		} else if connectionState == webrtc.ICEConnectionStateFailed || connectionState == webrtc.ICEConnectionStateDisconnected || connectionState == webrtc.ICEConnectionStateClosed {
+			fmt.Fprintf(os.Stderr, "ICE connection closed/disconnected/failed, stopping video streaming...\n")
+			connectionClosedCancel()
 		}
 	}, func(s webrtc.PeerConnectionState) {
 		fmt.Fprintf(os.Stderr, "Peer Connection State: %s\n", s.String())
 		if s == webrtc.PeerConnectionStateConnected {
 			fmt.Fprintf(os.Stderr, "Peer connection established!\n")
-		} else if s == webrtc.PeerConnectionStateFailed {
-			fmt.Fprintf(os.Stderr, "ERROR: Peer connection failed!\n")
+		} else if s == webrtc.PeerConnectionStateFailed || s == webrtc.PeerConnectionStateClosed || s == webrtc.PeerConnectionStateDisconnected {
+			fmt.Fprintf(os.Stderr, "Peer connection closed/disconnected/failed, stopping video streaming...\n")
+			connectionClosedCancel()
 		}
 	})
 
@@ -190,11 +193,16 @@ func main() {
 	ndtcCtrl := NewNdtcController()
 
 	videoDone := make(chan bool, 1)
-	go writeVideoToTrackNDTC(videoTrack, *loop, fdaceWin, ndtcCtrl, videoDone)
+	go writeVideoToTrackNDTC(videoTrack, *loop, fdaceWin, ndtcCtrl, videoDone, connectionClosedCtx)
 
 	select {
 	case <-videoDone:
 		fmt.Fprintf(os.Stderr, "Video streaming completed, closing connection...\n")
+		if err := peerConnection.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error closing peer connection: %v\n", err)
+		}
+	case <-connectionClosedCtx.Done():
+		fmt.Fprintf(os.Stderr, "Connection closed/disconnected, stopping video streaming...\n")
 		if err := peerConnection.Close(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error closing peer connection: %v\n", err)
 		}
@@ -209,7 +217,7 @@ func main() {
 // writeVideoToTrackNDTC 基于 FFmpeg 解码+编码，将 H.264 帧发送到 WebRTC video track，
 // 同时为每一帧构建 FDACE 样本并更新 NDTC 控制器。
 // 当前实现只在发送侧近似使用 S≈R，因此更偏工程近似版。
-func writeVideoToTrackNDTC(track *webrtc.TrackLocalStaticSample, loopVideo bool, fdaceWin *FdaceWindow, ctrl *NdtcController, done chan<- bool) {
+func writeVideoToTrackNDTC(track *webrtc.TrackLocalStaticSample, loopVideo bool, fdaceWin *FdaceWindow, ctrl *NdtcController, done chan<- bool, ctx context.Context) {
 	frameRate := videoStream.AvgFrameRate()
 	if frameRate.Num() == 0 {
 		frameRate = astiav.NewRational(30, 1)
@@ -221,7 +229,17 @@ func writeVideoToTrackNDTC(track *webrtc.TrackLocalStaticSample, loopVideo bool,
 
 	frameID := 0
 
-	for range ticker.C {
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Fprintf(os.Stderr, "Connection closed, stopping video streaming...\n")
+			select {
+			case done <- true:
+			default:
+			}
+			return
+		case <-ticker.C:
+		}
 		decodePacket.Unref()
 
 		if err = inputFormatContext.ReadFrame(decodePacket); err != nil {
@@ -269,7 +287,16 @@ func writeVideoToTrackNDTC(track *webrtc.TrackLocalStaticSample, loopVideo bool,
 			frameID++
 			sendStart := time.Now()
 
+			// 闭环控制：在编码前获取预算并调整编码器
+			nextBits, pacing := ctrl.NextFrameBudget()
+			
+			// 初始化编码器（如果还没初始化）
 			initVideoEncoding()
+			
+			// 根据预算调整编码器质量（闭环控制的关键步骤）
+			if err = updateEncoderForBudget(nextBits); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: Failed to update encoder for budget %d: %v, using default\n", nextBits, err)
+			}
 
 			if err = softwareScaleContext.ScaleFrame(decodeFrame, scaledFrame); err != nil {
 				fmt.Fprintf(os.Stderr, "Error scaling frame: %v\n", err)
@@ -303,8 +330,13 @@ func writeVideoToTrackNDTC(track *webrtc.TrackLocalStaticSample, loopVideo bool,
 
 				if err = track.WriteSample(media.Sample{Data: data, Duration: h264FrameDuration}); err != nil {
 					encodePacket.Free()
-					fmt.Fprintf(os.Stderr, "Error writing sample: %v\n", err)
-					continue
+					fmt.Fprintf(os.Stderr, "Error writing sample (connection may be closed): %v\n", err)
+					// 如果写入失败，可能是连接已断开，退出循环
+					select {
+					case done <- true:
+					default:
+					}
+					return
 				}
 				encodePacket.Free()
 			}
@@ -324,10 +356,17 @@ func writeVideoToTrackNDTC(track *webrtc.TrackLocalStaticSample, loopVideo bool,
 				ctrl.OnCapacityEstimate(capBps)
 			}
 
-			// 查询下一帧预算与 pacing（当前版本只用于日志与内部状态更新）
-			nextBits, pacing := ctrl.NextFrameBudget()
-			fmt.Fprintf(os.Stderr, "[NDTC] Frame %d sent_bits=%.0f, est_next_bits=%d, pacing=%v\n",
-				frameID, sentBitsForFrame, nextBits, pacing)
+			// 应用 pacing：如果 pacing 时间大于帧间隔，在帧间 sleep
+			// 这样可以控制发送节奏，避免突发发送
+			if pacing > h264FrameDuration {
+				sleepDuration := pacing - h264FrameDuration
+				if sleepDuration > 0 {
+					time.Sleep(sleepDuration)
+				}
+			}
+
+			fmt.Fprintf(os.Stderr, "[NDTC] Frame %d sent_bits=%.0f, target_bits=%d, pacing=%v, actual_duration=%v\n",
+				frameID, sentBitsForFrame, nextBits, pacing, sendDur)
 		}
 	}
 }

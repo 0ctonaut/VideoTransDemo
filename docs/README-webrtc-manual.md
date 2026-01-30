@@ -239,6 +239,25 @@ mahimahi 参数通过 server 脚本传递：
 
 所有 client 脚本在接收完成后会自动调用 `scripts/evaluate.sh` 进行质量评估。
 
+### 使用的 FFmpeg 版本
+
+本项目默认优先使用你本地自编译、带 `libvmaf` 的 FFmpeg：
+
+- 默认路径：`~/ffmpeg-vmaf/bin/ffmpeg`
+- 也可以通过环境变量覆盖：
+  - `FFMPEG_BIN`: 指定要使用的 ffmpeg 可执行文件路径
+  - `VMAF_MODEL`: 指定 VMAF 模型文件路径（默认：`~/ffmpeg-vmaf/share/model/vmaf_v0.6.1.json`）
+
+示例：
+
+```bash
+export FFMPEG_BIN="$HOME/ffmpeg-vmaf/bin/ffmpeg"
+export VMAF_MODEL="$HOME/ffmpeg-vmaf/share/model/vmaf_v0.6.1.json"
+./scripts/client-gcc.sh --video assets/Ultra.mp4
+```
+
+如果找不到上述路径，`evaluate.sh` 会回退到系统中的 `ffmpeg`，此时可能无法计算 VMAF，仅能使用 PSNR/SSIM。
+
 ### 自动评估
 
 client 脚本会自动执行以下步骤：
@@ -246,7 +265,10 @@ client 脚本会自动执行以下步骤：
 1. 将接收到的 `received.h264` 转换为 MP4（使用 FFmpeg 重新编码修复）
 2. 计算 PSNR（峰值信噪比）
 3. 计算 SSIM（结构相似性）
-4. 计算 VMAF（视频多方法评估融合，如果支持）
+4. 按 Netflix 推荐方式计算 VMAF（视频多方法评估融合）：
+   - 为参考视频和失真视频设置统一帧率（使用 `-r <FPS>`）
+   - 使用 `setpts=PTS-STARTPTS` 对齐 PTS
+   - 使用 `libvmaf` 滤镜输出 JSON 日志（包含逐帧和聚合 VMAF 指标）
 
 评估结果保存在 session 目录下：
 - `psnr.log`: PSNR 逐帧数据
@@ -258,11 +280,13 @@ client 脚本会自动执行以下步骤：
 如果需要手动运行评估：
 
 ```bash
+export FFMPEG_BIN="$HOME/ffmpeg-vmaf/bin/ffmpeg"
 ./scripts/evaluate.sh <received.h264> <reference.mp4> <fps>
 ```
 
 示例：
 ```bash
+export FFMPEG_BIN="$HOME/ffmpeg-vmaf/bin/ffmpeg"
 ./scripts/evaluate.sh session_gcc_2601291323/received.h264 assets/Ultra.mp4 30
 ```
 
