@@ -92,7 +92,7 @@ if [ ! -f "$CLIENT_BIN" ] || [ "src/client_ndtc.go" -nt "$CLIENT_BIN" ] || [ "sr
     echo "Building NDTC client..."
     mkdir -p build
     go build -v -tags ndtc -o "$CLIENT_BIN" \
-      src/client_ndtc.go src/common.go src/metrics.go src/fdace_estimator.go src/ndtc_controller.go src/h264_writer.go
+      src/client_ndtc.go src/common.go src/metrics.go src/fdace_estimator.go src/ndtc_controller.go src/h264_writer.go src/metrics_summary.go src/frame_metadata.go
 fi
 
 echo "=========================================="

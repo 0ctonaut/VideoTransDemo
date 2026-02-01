@@ -235,6 +235,52 @@ mahimahi 参数通过 server 脚本传递：
 
 这样可以正确模拟复杂的网络条件。
 
+## 帧级性能指标统计
+
+所有算法实验会自动记录帧级性能指标，包括：
+
+### 指标说明
+
+1. **Average & P99 Frame Latency（平均和 P99 帧延迟）**
+   - **端到端延迟**：从 server 发送帧到 client 接收帧的时间差（如果 server metadata 可用）
+   - **帧间隔延迟**：相邻帧接收时间差
+   - **Average Latency**：所有帧延迟的平均值
+   - **P99 Latency**：延迟的 99 百分位数
+
+2. **Stall Rate（卡顿率）**
+   - 检测帧间隔 > 2倍正常帧间隔的帧（例如 30fps 时 > 66.7ms）
+   - Stall Rate = Stall 帧数 / 总帧数
+
+3. **Effective Bitrate（有效码率）**
+   - 基于实际接收的比特数计算
+   - 使用滑动窗口（最近 1 秒）计算瞬时码率
+   - 汇总统计显示平均有效码率
+
+### 输出文件
+
+每个实验 session 目录下会生成以下文件：
+
+- `frame_metadata.csv`：Server 端记录的每帧发送时间戳
+  - 格式：`frame_id, send_start_unix_ms, send_end_unix_ms, frame_bits`
+- `client_metrics.csv`：Client 端记录的每帧指标
+  - 格式：`timestamp_unix_ms, frame_index, latency_ms, stall, effective_bitrate_kbps`
+- `metrics_summary.json`：汇总统计（JSON 格式）
+- `metrics_summary.txt`：汇总统计（文本格式，便于阅读）
+
+### 查看汇总统计
+
+汇总统计会在 client 退出时自动计算并显示，也可以在评估脚本完成后查看：
+
+```bash
+# 查看 JSON 格式（需要 jq）
+jq . session_*/metrics_summary.json
+
+# 查看文本格式
+cat session_*/metrics_summary.txt
+```
+
+评估脚本 `evaluate.sh` 会自动显示汇总统计（如果存在）。
+
 ## 视频质量评估
 
 所有 client 脚本在接收完成后会自动调用 `scripts/evaluate.sh` 进行质量评估。

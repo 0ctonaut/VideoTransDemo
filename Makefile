@@ -6,24 +6,24 @@ SRC_DIR := src
 BUILD_DIR := build
 
 # 源文件
-CLIENT_SRC := $(SRC_DIR)/client.go $(SRC_DIR)/common.go $(SRC_DIR)/h264_writer.go
+CLIENT_SRC := $(SRC_DIR)/client.go $(SRC_DIR)/common.go $(SRC_DIR)/h264_writer.go $(SRC_DIR)/metrics.go $(SRC_DIR)/frame_metadata.go
 SERVER_SRC := $(SRC_DIR)/server.go $(SRC_DIR)/common.go
 
 # GCC 客户端/服务器源文件（GCC 实验）
-CLIENT_GCC_SRC := $(SRC_DIR)/client-gcc.go $(SRC_DIR)/common.go $(SRC_DIR)/metrics.go $(SRC_DIR)/h264_writer.go
-SERVER_GCC_SRC := $(SRC_DIR)/server-gcc.go $(SRC_DIR)/common.go $(SRC_DIR)/server_ffmpeg_gcc.go
+CLIENT_GCC_SRC := $(SRC_DIR)/client-gcc.go $(SRC_DIR)/common.go $(SRC_DIR)/metrics.go $(SRC_DIR)/h264_writer.go $(SRC_DIR)/metrics_summary.go $(SRC_DIR)/frame_metadata.go
+SERVER_GCC_SRC := $(SRC_DIR)/server-gcc.go $(SRC_DIR)/common.go $(SRC_DIR)/server_ffmpeg_gcc.go $(SRC_DIR)/frame_metadata.go
 
 # NDTC 源文件
-SERVER_NDTC_SRC := $(SRC_DIR)/server_ndtc.go $(SRC_DIR)/common.go $(SRC_DIR)/ndtc_controller.go $(SRC_DIR)/fdace_estimator.go $(SRC_DIR)/server_ffmpeg_ndtc.go
-CLIENT_NDTC_SRC := $(SRC_DIR)/client_ndtc.go $(SRC_DIR)/common.go $(SRC_DIR)/metrics.go $(SRC_DIR)/h264_writer.go
+SERVER_NDTC_SRC := $(SRC_DIR)/server_ndtc.go $(SRC_DIR)/common.go $(SRC_DIR)/ndtc_controller.go $(SRC_DIR)/fdace_estimator.go $(SRC_DIR)/server_ffmpeg_ndtc.go $(SRC_DIR)/frame_metadata.go
+CLIENT_NDTC_SRC := $(SRC_DIR)/client_ndtc.go $(SRC_DIR)/common.go $(SRC_DIR)/metrics.go $(SRC_DIR)/h264_writer.go $(SRC_DIR)/metrics_summary.go $(SRC_DIR)/frame_metadata.go
 
 # Salsify 源文件
-SERVER_SALSIFY_SRC := $(SRC_DIR)/server_salsify.go $(SRC_DIR)/common.go $(SRC_DIR)/salsify_controller.go $(SRC_DIR)/server_ffmpeg_salsify.go
-CLIENT_SALSIFY_SRC := $(SRC_DIR)/client_salsify.go $(SRC_DIR)/common.go $(SRC_DIR)/metrics.go $(SRC_DIR)/salsify_controller.go $(SRC_DIR)/h264_writer.go
+SERVER_SALSIFY_SRC := $(SRC_DIR)/server_salsify.go $(SRC_DIR)/common.go $(SRC_DIR)/salsify_controller.go $(SRC_DIR)/server_ffmpeg_salsify.go $(SRC_DIR)/frame_metadata.go
+CLIENT_SALSIFY_SRC := $(SRC_DIR)/client_salsify.go $(SRC_DIR)/common.go $(SRC_DIR)/metrics.go $(SRC_DIR)/salsify_controller.go $(SRC_DIR)/h264_writer.go $(SRC_DIR)/metrics_summary.go $(SRC_DIR)/frame_metadata.go
 
 # BurstRTC 源文件
-SERVER_BURST_SRC := $(SRC_DIR)/server_burst.go $(SRC_DIR)/common.go $(SRC_DIR)/burst_controller.go $(SRC_DIR)/server_ffmpeg_burst.go
-CLIENT_BURST_SRC := $(SRC_DIR)/client_burst.go $(SRC_DIR)/common.go $(SRC_DIR)/metrics.go $(SRC_DIR)/burst_controller.go $(SRC_DIR)/h264_writer.go
+SERVER_BURST_SRC := $(SRC_DIR)/server_burst.go $(SRC_DIR)/common.go $(SRC_DIR)/burst_controller.go $(SRC_DIR)/server_ffmpeg_burst.go $(SRC_DIR)/frame_metadata.go
+CLIENT_BURST_SRC := $(SRC_DIR)/client_burst.go $(SRC_DIR)/common.go $(SRC_DIR)/metrics.go $(SRC_DIR)/burst_controller.go $(SRC_DIR)/h264_writer.go $(SRC_DIR)/metrics_summary.go $(SRC_DIR)/frame_metadata.go
 
 # 编译输出
 CLIENT_BIN := $(BUILD_DIR)/client

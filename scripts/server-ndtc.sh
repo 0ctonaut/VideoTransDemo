@@ -83,7 +83,7 @@ if [ ! -f "$SERVER_BIN" ] || [ "src/server_ndtc.go" -nt "$SERVER_BIN" ] || [ "sr
     echo "Building NDTC server..."
     mkdir -p build
     go build -v -tags ndtc -o "$SERVER_BIN" \
-      src/server_ndtc.go src/common.go src/fdace_estimator.go src/ndtc_controller.go src/server_ffmpeg_ndtc.go
+      src/server_ndtc.go src/common.go src/fdace_estimator.go src/ndtc_controller.go src/server_ffmpeg_ndtc.go src/frame_metadata.go
 fi
 
 # Session directory: session_ndtc_YYMMDDHHMM or custom name

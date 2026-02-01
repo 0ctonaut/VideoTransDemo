@@ -118,7 +118,9 @@ func main() {
 		// 只处理 H.264 视频
 		if codecName == "h264" {
 			// 将 H.264 数据写入文件
-			writeH264ToFile(track, *outputFile, *maxDuration, *maxSize)
+			// 默认帧率 30 fps，sessionDir 为空（基础 client 不使用）
+			frameRate := 30.0
+			writeH264ToFile(track, *outputFile, *maxDuration, *maxSize, "", frameRate)
 		} else {
 			fmt.Fprintf(os.Stderr, "Unsupported codec: %s, only H264 is supported\n", codecName)
 		}

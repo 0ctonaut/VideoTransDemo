@@ -92,7 +92,7 @@ if [ ! -f "$CLIENT_BIN" ] || [ "src/client_burst.go" -nt "$CLIENT_BIN" ] || [ "s
     echo "Building BurstRTC client..."
     mkdir -p build
     go build -v -tags burst -o "$CLIENT_BIN" \
-        src/client_burst.go src/common.go src/metrics.go src/burst_controller.go src/h264_writer.go
+        src/client_burst.go src/common.go src/metrics.go src/burst_controller.go src/h264_writer.go src/metrics_summary.go src/frame_metadata.go
 fi
 
 echo "=========================================="

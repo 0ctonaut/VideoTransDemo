@@ -36,9 +36,10 @@ type FrameMetric struct {
 //   - 目前只在 GCC / NDTC / Salsify 预留入口时使用
 //   - 每个 session 建议创建一个实例，将 CSV 保存在 session 目录下
 type MetricsCSVWriter struct {
-	mu     sync.Mutex
-	writer *csv.Writer
-	file   *os.File
+	mu        sync.Mutex
+	writer    *csv.Writer
+	file      *os.File
+	startTime time.Time // 记录开始时间，用于计算相对时间戳
 }
 
 // NewMetricsCSVWriter 创建一个新的 CSV 写入器。
@@ -60,7 +61,7 @@ func NewMetricsCSVWriter(csvPath string) (*MetricsCSVWriter, error) {
 	w := csv.NewWriter(f)
 
 	header := []string{
-		"timestamp_unix_ms",
+		"timestamp_ms",           // 相对时间戳（毫秒，从开始时间算起）
 		"frame_index",
 		"latency_ms",
 		"stall",
@@ -73,8 +74,47 @@ func NewMetricsCSVWriter(csvPath string) (*MetricsCSVWriter, error) {
 	w.Flush()
 
 	return &MetricsCSVWriter{
-		writer: w,
-		file:   f,
+		writer:    w,
+		file:      f,
+		startTime: time.Now(), // 记录开始时间
+	}, nil
+}
+
+// NewMetricsCSVWriterWithStartTime 创建一个新的 CSV 写入器，使用指定的开始时间作为基准
+// 这允许 client 使用 server 的开始时间作为统一的时间基准
+func NewMetricsCSVWriterWithStartTime(csvPath string, startTime time.Time) (*MetricsCSVWriter, error) {
+	if csvPath == "" {
+		return nil, fmt.Errorf("csvPath is empty")
+	}
+
+	if err := os.MkdirAll(filepathDir(csvPath), 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create metrics directory: %w", err)
+	}
+
+	f, err := os.Create(csvPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create metrics csv: %w", err)
+	}
+
+	w := csv.NewWriter(f)
+
+	header := []string{
+		"timestamp_ms",           // 相对时间戳（毫秒，从开始时间算起）
+		"frame_index",
+		"latency_ms",
+		"stall",
+		"effective_bitrate_kbps",
+	}
+	if err = w.Write(header); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("failed to write metrics header: %w", err)
+	}
+	w.Flush()
+
+	return &MetricsCSVWriter{
+		writer:    w,
+		file:      f,
+		startTime: startTime, // 使用指定的开始时间
 	}, nil
 }
 
@@ -87,8 +127,11 @@ func (m *MetricsCSVWriter) WriteMetric(metric FrameMetric) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// 计算相对时间戳（从开始时间算起的毫秒数）
+	relativeMs := metric.Timestamp.Sub(m.startTime).Milliseconds()
+
 	record := []string{
-		fmt.Sprintf("%d", metric.Timestamp.UnixMilli()),
+		fmt.Sprintf("%d", relativeMs),
 		fmt.Sprintf("%d", metric.FrameIndex),
 		fmt.Sprintf("%.3f", metric.LatencyMillis),
 		fmt.Sprintf("%t", metric.Stall),

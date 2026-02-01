@@ -8,6 +8,15 @@ set -e
 DEFAULT_FFMPEG="$HOME/ffmpeg-vmaf/bin/ffmpeg"
 if [ -x "$DEFAULT_FFMPEG" ]; then
     FFMPEG_BIN="${FFMPEG_BIN:-$DEFAULT_FFMPEG}"
+    # Set LD_LIBRARY_PATH for custom ffmpeg-vmaf binary
+    # Ensure the path exists and is properly formatted
+    if [ -d "$HOME/ffmpeg-vmaf/lib" ]; then
+        if [ -z "$LD_LIBRARY_PATH" ]; then
+            export LD_LIBRARY_PATH="$HOME/ffmpeg-vmaf/lib"
+        else
+            export LD_LIBRARY_PATH="$HOME/ffmpeg-vmaf/lib:$LD_LIBRARY_PATH"
+        fi
+    fi
 else
     FFMPEG_BIN="${FFMPEG_BIN:-ffmpeg}"
 fi
@@ -96,6 +105,33 @@ else
     echo "  Install libvmaf-enabled ffmpeg or use PSNR/SSIM instead"
 fi
 echo ""
+
+# 显示汇总统计（如果存在）
+SUMMARY_JSON="${SESSION_DIR}/metrics_summary.json"
+if [ -f "$SUMMARY_JSON" ]; then
+    echo ""
+    echo "=========================================="
+    echo "  Frame Metrics Summary"
+    echo "=========================================="
+    if command -v jq &> /dev/null; then
+        # 使用 jq 格式化输出
+        jq -r '
+            "Total Frames:           \(.total_frames)",
+            "Average Latency:        \(.average_latency_ms) ms",
+            "P99 Latency:            \(.p99_latency_ms) ms",
+            "Stall Rate:             \(.stall_rate * 100) % (\(.total_stall_frames) frames)",
+            "Effective Bitrate:      \(.effective_bitrate_kbps) kbps",
+            "Total Duration:         \(.total_duration_seconds) seconds"
+        ' "$SUMMARY_JSON"
+    else
+        # 如果没有 jq，直接显示文本文件
+        SUMMARY_TXT="${SESSION_DIR}/metrics_summary.txt"
+        if [ -f "$SUMMARY_TXT" ]; then
+            cat "$SUMMARY_TXT"
+        fi
+    fi
+    echo ""
+fi
 
 echo "=========================================="
 echo "  Evaluation Complete"

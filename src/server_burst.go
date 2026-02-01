@@ -214,8 +214,21 @@ func main() {
 		}
 	}
 
+	// 创建 frame metadata writer（如果 session-dir 存在）
+	var metadataWriter *FrameMetadataWriter
+	if *sessionDir != "" {
+		csvPath := filepath.Join(*sessionDir, "frame_metadata.csv")
+		var err error
+		metadataWriter, err = NewFrameMetadataWriter(csvPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to create frame metadata CSV writer: %v\n", err)
+		} else {
+			defer metadataWriter.Close()
+		}
+	}
+
 	videoDone := make(chan bool, 1)
-	go writeVideoToTrackBurst(videoTrack, *loop, burstCtrl, metricsWriter, videoDone, connectionClosedCtx)
+	go writeVideoToTrackBurst(videoTrack, *loop, burstCtrl, metricsWriter, videoDone, connectionClosedCtx, metadataWriter)
 
 	select {
 	case <-videoDone:
@@ -335,7 +348,7 @@ func (m *BurstMetricsWriter) Close() {
 
 // writeVideoToTrackBurst 基于 FFmpeg 解码+编码，将 H.264 帧发送到 WebRTC video track，
 // 同时为每一帧更新 BurstRTC 控制器，记录发送统计并应用 per-frame 预算控制。
-func writeVideoToTrackBurst(track *webrtc.TrackLocalStaticSample, loopVideo bool, ctrl *BurstController, metricsWriter *BurstMetricsWriter, done chan<- bool, ctx context.Context) {
+func writeVideoToTrackBurst(track *webrtc.TrackLocalStaticSample, loopVideo bool, ctrl *BurstController, metricsWriter *BurstMetricsWriter, done chan<- bool, ctx context.Context, metadataWriter *FrameMetadataWriter) {
 	frameRate := videoStream.AvgFrameRate()
 	if frameRate.Num() == 0 {
 		frameRate = astiav.NewRational(30, 1)
@@ -523,6 +536,16 @@ func writeVideoToTrackBurst(track *webrtc.TrackLocalStaticSample, loopVideo bool
 			if metricsWriter != nil {
 				metricsWriter.WriteBurstMetric(frameID, targetBits, sentBitsForFrame, burstFraction,
 					sendStart, sendEnd, availBps, meanBits, varBits)
+			}
+
+			// 写入 frame metadata
+			if metadataWriter != nil {
+				metadataWriter.WriteMetadata(FrameMetadata{
+					FrameID:   frameID,
+					SendStart: sendStart,
+					SendEnd:   sendEnd,
+					FrameBits: sentBitsForFrame,
+				})
 			}
 		}
 	}

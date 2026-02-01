@@ -83,7 +83,7 @@ if [ ! -f "$SERVER_BIN" ] || [ "src/server_salsify.go" -nt "$SERVER_BIN" ] || [ 
     echo "Building Salsify server..."
     mkdir -p build
     go build -v -tags salsify -o "$SERVER_BIN" \
-      src/server_salsify.go src/common.go src/salsify_controller.go src/server_ffmpeg_salsify.go
+      src/server_salsify.go src/common.go src/salsify_controller.go src/server_ffmpeg_salsify.go src/frame_metadata.go
 fi
 
 # Session directory: session_salsify_YYMMDDHHMM or custom name

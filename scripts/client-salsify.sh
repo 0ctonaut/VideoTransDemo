@@ -92,7 +92,7 @@ if [ ! -f "$CLIENT_BIN" ] || [ "src/client_salsify.go" -nt "$CLIENT_BIN" ] || [ 
     echo "Building Salsify client..."
     mkdir -p build
     go build -v -tags salsify -o "$CLIENT_BIN" \
-      src/client_salsify.go src/common.go src/metrics.go src/salsify_controller.go src/h264_writer.go
+      src/client_salsify.go src/common.go src/metrics.go src/salsify_controller.go src/h264_writer.go src/metrics_summary.go src/frame_metadata.go
 fi
 
 echo "=========================================="

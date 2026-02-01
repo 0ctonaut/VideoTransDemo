@@ -84,7 +84,7 @@ if [ ! -f "$SERVER_BIN" ] || [ "src/server_burst.go" -nt "$SERVER_BIN" ] || [ "s
     echo "Building BurstRTC server..."
     mkdir -p build
     go build -v -tags burst -o "$SERVER_BIN" \
-        src/server_burst.go src/common.go src/burst_controller.go src/server_ffmpeg_burst.go
+        src/server_burst.go src/common.go src/burst_controller.go src/server_ffmpeg_burst.go src/frame_metadata.go
 fi
 
 # Session directory: session_burst_YYMMDDHHMM or custom name

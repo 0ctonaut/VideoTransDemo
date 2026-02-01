@@ -106,7 +106,9 @@ func main() {
 		if codecName == "h264" {
 			// 在单独的 goroutine 中接收并写文件，结束后通知 main
 			go func() {
-				writeH264ToFile(track, *outputFile, *maxDuration, *maxSize)
+				// 默认帧率 30 fps
+				frameRate := 30.0
+				writeH264ToFile(track, *outputFile, *maxDuration, *maxSize, *sessionDir, frameRate)
 				recvOnce.Do(func() {
 					close(recvDone)
 				})
@@ -185,7 +187,29 @@ func main() {
 	// ========== 等待接收协程结束 ==========
 	fmt.Fprintf(os.Stderr, "Waiting for receive loop to finish...\n")
 	<-recvDone
-	fmt.Fprintf(os.Stderr, "Receive loop finished, exiting client-gcc\n")
+	fmt.Fprintf(os.Stderr, "Receive loop finished\n")
+
+	// ========== 计算汇总统计 ==========
+	if *sessionDir != "" {
+		csvPath := filepath.Join(*sessionDir, "client_metrics.csv")
+		if summary, err := CalculateSummaryMetrics(csvPath); err == nil {
+			if err := WriteSummaryMetrics(summary, *sessionDir); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: Failed to write summary metrics: %v\n", err)
+			} else {
+				fmt.Fprintf(os.Stderr, "\n=== Metrics Summary ===\n")
+				fmt.Fprintf(os.Stderr, "Total Frames: %d\n", summary.TotalFrames)
+				fmt.Fprintf(os.Stderr, "Average Latency: %.3f ms\n", summary.AverageLatencyMs)
+				fmt.Fprintf(os.Stderr, "P99 Latency: %.3f ms\n", summary.P99LatencyMs)
+				fmt.Fprintf(os.Stderr, "Stall Rate: %.2f%% (%d frames)\n", summary.StallRate*100.0, summary.TotalStallFrames)
+				fmt.Fprintf(os.Stderr, "Effective Bitrate: %.2f kbps\n", summary.EffectiveBitrateKbps)
+				fmt.Fprintf(os.Stderr, "======================\n\n")
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "Warning: Could not calculate summary metrics: %v\n", err)
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "Exiting client-gcc\n")
 }
 
 

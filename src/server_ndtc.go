@@ -188,12 +188,25 @@ func main() {
 	initVideoSource(absPath)
 	defer freeVideoCoding()
 
+	// 创建 frame metadata writer（如果 session-dir 存在）
+	var metadataWriter *FrameMetadataWriter
+	if *sessionDir != "" {
+		csvPath := filepath.Join(*sessionDir, "frame_metadata.csv")
+		var err error
+		metadataWriter, err = NewFrameMetadataWriter(csvPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to create frame metadata CSV writer: %v\n", err)
+		} else {
+			defer metadataWriter.Close()
+		}
+	}
+
 	// 创建 FDACE 窗口与 NDTC 控制器（当前版本仅在发送侧近似使用）
 	fdaceWin := NewFdaceWindow(120)
 	ndtcCtrl := NewNdtcController()
 
 	videoDone := make(chan bool, 1)
-	go writeVideoToTrackNDTC(videoTrack, *loop, fdaceWin, ndtcCtrl, videoDone, connectionClosedCtx)
+	go writeVideoToTrackNDTC(videoTrack, *loop, fdaceWin, ndtcCtrl, videoDone, connectionClosedCtx, metadataWriter)
 
 	select {
 	case <-videoDone:
@@ -217,7 +230,7 @@ func main() {
 // writeVideoToTrackNDTC 基于 FFmpeg 解码+编码，将 H.264 帧发送到 WebRTC video track，
 // 同时为每一帧构建 FDACE 样本并更新 NDTC 控制器。
 // 当前实现只在发送侧近似使用 S≈R，因此更偏工程近似版。
-func writeVideoToTrackNDTC(track *webrtc.TrackLocalStaticSample, loopVideo bool, fdaceWin *FdaceWindow, ctrl *NdtcController, done chan<- bool, ctx context.Context) {
+func writeVideoToTrackNDTC(track *webrtc.TrackLocalStaticSample, loopVideo bool, fdaceWin *FdaceWindow, ctrl *NdtcController, done chan<- bool, ctx context.Context, metadataWriter *FrameMetadataWriter) {
 	frameRate := videoStream.AvgFrameRate()
 	if frameRate.Num() == 0 {
 		frameRate = astiav.NewRational(30, 1)
@@ -367,6 +380,16 @@ func writeVideoToTrackNDTC(track *webrtc.TrackLocalStaticSample, loopVideo bool,
 
 			fmt.Fprintf(os.Stderr, "[NDTC] Frame %d sent_bits=%.0f, target_bits=%d, pacing=%v, actual_duration=%v\n",
 				frameID, sentBitsForFrame, nextBits, pacing, sendDur)
+
+			// 写入 frame metadata
+			if metadataWriter != nil {
+				metadataWriter.WriteMetadata(FrameMetadata{
+					FrameID:   frameID,
+					SendStart: sendStart,
+					SendEnd:   sendEnd,
+					FrameBits: int(sentBitsForFrame),
+				})
+			}
 		}
 	}
 }

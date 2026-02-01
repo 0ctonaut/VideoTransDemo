@@ -195,8 +195,21 @@ func main() {
 	initVideoSource(absPath)
 	defer freeVideoCoding()
 
+	// 创建 frame metadata writer（如果 session-dir 存在）
+	var metadataWriter *FrameMetadataWriter
+	if *sessionDir != "" {
+		csvPath := filepath.Join(*sessionDir, "frame_metadata.csv")
+		var err error
+		metadataWriter, err = NewFrameMetadataWriter(csvPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to create frame metadata CSV writer: %v\n", err)
+		} else {
+			defer metadataWriter.Close()
+		}
+	}
+
 	videoDone := make(chan bool, 1)
-	go writeVideoToTrackWithGCCMetrics(videoTrack, *loop, videoDone, connectionClosedCtx)
+	go writeVideoToTrackWithGCCMetrics(videoTrack, *loop, videoDone, connectionClosedCtx, metadataWriter)
 
 	select {
 	case <-videoDone:
@@ -219,7 +232,7 @@ func main() {
 
 // writeVideoToTrackWithGCCMetrics 与原 writeVideoToTrack 几乎相同，目前只负责按帧率发送 H.264。
 // 为后续 GCC 实验预留扩展点（例如在这里根据带宽估计调整编码参数）。
-func writeVideoToTrackWithGCCMetrics(track *webrtc.TrackLocalStaticSample, loopVideo bool, done chan<- bool, ctx context.Context) {
+func writeVideoToTrackWithGCCMetrics(track *webrtc.TrackLocalStaticSample, loopVideo bool, done chan<- bool, ctx context.Context, metadataWriter *FrameMetadataWriter) {
 	frameRate := videoStream.AvgFrameRate()
 	if frameRate.Num() == 0 {
 		frameRate = astiav.NewRational(30, 1)
@@ -228,6 +241,8 @@ func writeVideoToTrackWithGCCMetrics(track *webrtc.TrackLocalStaticSample, loopV
 
 	ticker := time.NewTicker(h264FrameDuration)
 	defer ticker.Stop()
+
+	frameID := 0
 
 	for {
 		select {
@@ -298,6 +313,9 @@ func writeVideoToTrackWithGCCMetrics(track *webrtc.TrackLocalStaticSample, loopV
 				break
 			}
 
+			frameID++
+			sendStart := time.Now()
+
 			initVideoEncoding()
 
 			if err = softwareScaleContext.ScaleFrame(decodeFrame, scaledFrame); err != nil {
@@ -313,6 +331,7 @@ func writeVideoToTrackWithGCCMetrics(track *webrtc.TrackLocalStaticSample, loopV
 				continue
 			}
 
+			var frameBits int
 			for {
 				encodePacket = astiav.AllocPacket()
 				if err = encodeCodecContext.ReceivePacket(encodePacket); err != nil {
@@ -325,7 +344,10 @@ func writeVideoToTrackWithGCCMetrics(track *webrtc.TrackLocalStaticSample, loopV
 					break
 				}
 
-				if err = track.WriteSample(media.Sample{Data: encodePacket.Data(), Duration: h264FrameDuration}); err != nil {
+				data := encodePacket.Data()
+				frameBits += len(data) * 8
+
+				if err = track.WriteSample(media.Sample{Data: data, Duration: h264FrameDuration}); err != nil {
 					encodePacket.Free()
 					fmt.Fprintf(os.Stderr, "Error writing sample (connection may be closed): %v\n", err)
 					// 如果写入失败，可能是连接已断开，退出循环
@@ -336,6 +358,18 @@ func writeVideoToTrackWithGCCMetrics(track *webrtc.TrackLocalStaticSample, loopV
 					return
 				}
 				encodePacket.Free()
+			}
+
+			sendEnd := time.Now()
+
+			// 写入 frame metadata
+			if metadataWriter != nil {
+				metadataWriter.WriteMetadata(FrameMetadata{
+					FrameID:   frameID,
+					SendStart: sendStart,
+					SendEnd:   sendEnd,
+					FrameBits: frameBits,
+				})
 			}
 		}
 	}

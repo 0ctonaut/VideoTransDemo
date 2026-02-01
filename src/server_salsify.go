@@ -195,6 +195,19 @@ func main() {
 	initVideoSource(absPath)
 	defer freeVideoCoding()
 
+	// 创建 frame metadata writer（如果 session-dir 存在）
+	var metadataWriter *FrameMetadataWriter
+	if *sessionDir != "" {
+		csvPath := filepath.Join(*sessionDir, "frame_metadata.csv")
+		var err error
+		metadataWriter, err = NewFrameMetadataWriter(csvPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to create frame metadata CSV writer: %v\n", err)
+		} else {
+			defer metadataWriter.Close()
+		}
+	}
+
 	// 创建 Salsify 控制器（目前仅基于发送侧吞吐做预算）
 	ctrl := NewSalsifyController(SalsifyConfig{
 		FrameInterval: time.Second / 30,
@@ -204,7 +217,7 @@ func main() {
 	})
 
 	videoDone := make(chan bool, 1)
-	go writeVideoToTrackSalsify(videoTrack, *loop, ctrl, videoDone, connectionClosedCtx)
+	go writeVideoToTrackSalsify(videoTrack, *loop, ctrl, videoDone, connectionClosedCtx, metadataWriter)
 
 	select {
 	case <-videoDone:
@@ -227,7 +240,7 @@ func main() {
 
 // writeVideoToTrackSalsify 在现有 FFmpeg 管线基础上，增加按帧 bit 统计并喂给 SalsifyController。
 // 当前版本仍然只编码单个候选，但已经按帧调用 NextFrameBudget 并打印预算，便于后续扩展为多候选选择。
-func writeVideoToTrackSalsify(track *webrtc.TrackLocalStaticSample, loopVideo bool, ctrl *SalsifyController, done chan<- bool, ctx context.Context) {
+func writeVideoToTrackSalsify(track *webrtc.TrackLocalStaticSample, loopVideo bool, ctrl *SalsifyController, done chan<- bool, ctx context.Context, metadataWriter *FrameMetadataWriter) {
 	frameRate := videoStream.AvgFrameRate()
 	if frameRate.Num() == 0 {
 		frameRate = astiav.NewRational(30, 1)
@@ -382,6 +395,16 @@ func writeVideoToTrackSalsify(track *webrtc.TrackLocalStaticSample, loopVideo bo
 				SendEnd:      frameSendEnd,
 				LossDetected: false,
 			})
+
+			// 写入 frame metadata
+			if metadataWriter != nil {
+				metadataWriter.WriteMetadata(FrameMetadata{
+					FrameID:   frameID,
+					SendStart: frameSendStart,
+					SendEnd:   frameSendEnd,
+					FrameBits: sentBitsForFrame,
+				})
+			}
 		}
 	}
 }
